@@ -18,6 +18,7 @@ from .storage import LocationStore
 from .typhoon import (
     NmcTyphoonNewsProvider,
     TyphoonProvider,
+    TyphoonTrackImage,
     TyphoonUnavailable,
     download_typhoon_track_image,
     format_typhoon_detail,
@@ -285,8 +286,9 @@ def register_commands(
             else:
                 detail = await provider.get_detail(parsed.query)
                 if isinstance(detail, TyphoonUnavailable):
-                    image_sent = await _send_typhoon_track_image(
+                    image_sent = await _send_typhoon_response(
                         ctx,
+                        None,
                         parsed.query,
                         provider,
                         plg,
@@ -294,9 +296,9 @@ def register_commands(
                     if not image_sent:
                         await ctx.send(format_typhoon_detail(detail))
                 else:
-                    await ctx.send(format_typhoon_detail(detail))
-                    await _send_typhoon_track_image(
+                    await _send_typhoon_response(
                         ctx,
+                        format_typhoon_detail(detail),
                         detail.summary.name or parsed.query,
                         provider,
                         plg,
@@ -359,37 +361,105 @@ async def _handle_radar_gif(
     await ctx.send([MessageElement.img(str(gif_path))])
 
 
-async def _send_typhoon_track_image(
+async def _send_typhoon_response(
     ctx: MessageContext,
+    text: str | None,
     query: str,
     provider: TyphoonProvider,
     plg: Any,
 ) -> bool:
-    """Send the latest NMC typhoon path forecast image when available."""
-    if not hasattr(provider, "get_track_image"):
+    """Send typhoon text and track image, preferring folded chat records."""
+    try:
+        payload = await _prepare_typhoon_track_image(query, provider, plg)
+    except Exception as exc:
+        _LOG.exception("AstroAssist typhoon track image download error")
+        if text:
+            await ctx.send(text)
+        await ctx.send(f"⚠️ 台风路径图下载失败: {exc}")
+        return bool(text)
+
+    if payload is None:
+        if text:
+            await ctx.send(text)
+            return True
         return False
+
+    image, img_path = payload
+    caption = _format_typhoon_track_caption(image)
+    if await _send_typhoon_forward_message(ctx, text, caption, img_path):
+        return True
+
+    if text:
+        await ctx.send(text)
+    await ctx.send(caption)
+    await ctx.send([MessageElement.img(str(img_path))])
+    return True
+
+
+async def _prepare_typhoon_track_image(
+    query: str,
+    provider: TyphoonProvider,
+    plg: Any,
+) -> tuple[TyphoonTrackImage, Path] | None:
+    """Download the latest NMC typhoon path forecast image when available."""
+    if not hasattr(provider, "get_track_image"):
+        return None
     image = await provider.get_track_image(query)
     if isinstance(image, TyphoonUnavailable):
         _LOG.info("AstroAssist typhoon track image unavailable: %s", image.message)
-        return False
+        return None
 
     suffix = Path(image.url.split("?", 1)[0]).suffix.lower() or ".jpg"
     filename_label = _safe_filename_piece(image.name or query or "track")
     img_path = Path(plg.data_dir) / f"typhoon_track_{filename_label}_{uuid4().hex}{suffix}"
-    try:
-        await download_typhoon_track_image(image.url, str(img_path))
-    except Exception as exc:
-        _LOG.exception("AstroAssist typhoon track image download error")
-        await ctx.send(f"⚠️ 台风路径图下载失败: {exc}")
+    await download_typhoon_track_image(image.url, str(img_path))
+    return image, img_path
+
+
+async def _send_typhoon_forward_message(
+    ctx: MessageContext,
+    text: str | None,
+    caption: str,
+    img_path: Path,
+) -> bool:
+    """Try to send typhoon output as a collapsed chat-record message."""
+    if not _supports_onebot_forward_message(ctx):
         return False
 
+    text_factory = getattr(MessageElement, "text", None)
+    message_factory = getattr(MessageElement, "message", None)
+    forward_factory = getattr(MessageElement, "forward", None)
+    if not (callable(text_factory) and callable(message_factory) and callable(forward_factory)):
+        return False
+
+    nodes: list[Any] = []
+    if text:
+        nodes.append(message_factory([text_factory(text)], nickname="AstroAssist"))
+    nodes.append(
+        message_factory(
+            [text_factory(caption), MessageElement.img(str(img_path))],
+            nickname="AstroAssist",
+        )
+    )
+    try:
+        await ctx.send([forward_factory(nodes)])
+    except Exception:
+        _LOG.exception("AstroAssist typhoon folded message send failed")
+        return False
+    return True
+
+
+def _supports_onebot_forward_message(ctx: MessageContext) -> bool:
+    adapter = getattr(ctx, "adapter", None)
+    return str(getattr(adapter, "platform", "") or "").lower() == "onebot_v11"
+
+
+def _format_typhoon_track_caption(image: TyphoonTrackImage) -> str:
     display_label = image.name or "台风路径预报"
     msg = f"🌀 {display_label}路径预报图"
     if image.time:
         msg += f"  ({image.time})"
-    await ctx.send(msg)
-    await ctx.send([MessageElement.img(str(img_path))])
-    return True
+    return msg
 
 
 def _safe_filename_piece(value: str) -> str:

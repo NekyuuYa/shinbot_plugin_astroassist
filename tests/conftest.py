@@ -21,12 +21,26 @@ class MessageElement:
     """Small MessageElement stub covering AstroAssist test needs."""
 
     @classmethod
+    def text(cls, content: str) -> dict[str, Any]:
+        return {"type": "text", "attrs": {"content": content}, "children": []}
+
+    @classmethod
     def img(cls, src: str, **kwargs: Any) -> dict[str, Any]:
-        return {"type": "img", "attrs": {"src": src, **kwargs}}
+        return {"type": "img", "attrs": {"src": src, **kwargs}, "children": []}
 
     @classmethod
     def file(cls, src: str, **kwargs: Any) -> dict[str, Any]:
-        return {"type": "file", "attrs": {"src": src, **kwargs}}
+        return {"type": "file", "attrs": {"src": src, **kwargs}, "children": []}
+
+    @classmethod
+    def message(
+        cls, children: list[dict[str, Any]] | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        return {"type": "message", "attrs": kwargs, "children": children or []}
+
+    @classmethod
+    def forward(cls, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"type": "message", "attrs": {"forward": "true"}, "children": nodes}
 
 
 elements_module.__dict__["MessageElement"] = MessageElement

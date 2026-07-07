@@ -46,8 +46,9 @@ class _FakePlugin:
 
 
 class _Ctx:
-    def __init__(self) -> None:
+    def __init__(self, *, adapter_platform: str = "onebot_v11") -> None:
         self.session_id = "session-1"
+        self.adapter = SimpleNamespace(platform=adapter_platform)
         self.sent: list[Any] = []
         self.stopped = False
 
@@ -538,15 +539,18 @@ async def test_typhoon_command_sends_track_image(
     await plugin.commands["台风"]["handler"](ctx, "2501")
 
     assert ctx.stopped
-    assert any("测试台风路径预报图" in item for item in ctx.sent if isinstance(item, str))
-    assert ctx.sent[-1][0]["type"] == "img"
-    first_src = ctx.sent[-1][0]["attrs"]["src"]
+    folded = ctx.sent[-1][0]
+    assert folded["type"] == "message"
+    assert folded["attrs"] == {"forward": "true"}
+    assert "2501 测试台风" in folded["children"][0]["children"][0]["attrs"]["content"]
+    assert "测试台风路径预报图" in folded["children"][1]["children"][0]["attrs"]["content"]
+    first_src = folded["children"][1]["children"][1]["attrs"]["src"]
     assert Path(first_src).name.startswith("typhoon_track_")
     assert Path(first_src).suffix == ".jpg"
 
     second_ctx = _Ctx()
     await plugin.commands["台风"]["handler"](second_ctx, "2501")
-    second_src = second_ctx.sent[-1][0]["attrs"]["src"]
+    second_src = second_ctx.sent[-1][0]["children"][1]["children"][1]["attrs"]["src"]
 
     assert first_src != second_src
     assert Path(second_src).name.startswith("typhoon_track_")
@@ -579,10 +583,52 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     await plugin.commands["台风"]["handler"](ctx, "美莎克")
 
     assert ctx.stopped
-    assert "当前台风快讯未匹配" not in "\n".join(
-        item for item in ctx.sent if isinstance(item, str)
-    )
-    assert any("美莎克路径预报图" in item for item in ctx.sent if isinstance(item, str))
-    image_src = ctx.sent[-1][0]["attrs"]["src"]
+    folded = ctx.sent[-1][0]
+    assert folded["type"] == "message"
+    assert folded["attrs"] == {"forward": "true"}
+    assert len(folded["children"]) == 1
+    assert "美莎克路径预报图" in folded["children"][0]["children"][0]["attrs"]["content"]
+    image_src = folded["children"][0]["children"][1]["attrs"]["src"]
+    assert Path(image_src).name.startswith("typhoon_track_")
+    assert Path(image_src).suffix == ".jpg"
+
+
+@pytest.mark.asyncio
+async def test_typhoon_command_falls_back_without_onebot_forward_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+
+    async def fake_download(url: str, dest: str) -> None:
+        Path(dest).write_bytes(url.encode())
+
+    class Provider:
+        async def list_active(self) -> list[TyphoonSummary]:
+            return []
+
+        async def get_detail(self, query: str) -> TyphoonDetail:
+            return TyphoonDetail(summary=TyphoonSummary(identifier=query, name="测试台风"))
+
+        async def get_track_image(self, query: str = "") -> TyphoonTrackImage:
+            assert query == "测试台风"
+            return TyphoonTrackImage(
+                url="https://image.nmc.cn/product/typhoon.JPG?v=1",
+                time="07/06 17:00",
+                name="测试台风",
+            )
+
+    monkeypatch.setattr(commands, "download_typhoon_track_image", fake_download)
+    plugin = _register(tmp_path, typhoon_provider=Provider())
+    ctx = _Ctx(adapter_platform="satori")
+
+    await plugin.commands["台风"]["handler"](ctx, "2501")
+
+    assert ctx.stopped
+    assert len(ctx.sent) == 3
+    assert "2501 测试台风" in ctx.sent[0]
+    assert "测试台风路径预报图" in ctx.sent[1]
+    assert ctx.sent[2][0]["type"] == "img"
+    image_src = ctx.sent[2][0]["attrs"]["src"]
     assert Path(image_src).name.startswith("typhoon_track_")
     assert Path(image_src).suffix == ".jpg"
