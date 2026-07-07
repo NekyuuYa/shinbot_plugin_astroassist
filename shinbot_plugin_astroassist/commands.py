@@ -1,4 +1,4 @@
-"""Command handlers for 晴天钟, 设置位置 and 雷达."""
+"""Command handlers for 晴天钟, 设置位置, 雷达 and 台风."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from shinbot.schema.elements import MessageElement
 
@@ -14,6 +15,16 @@ from .geo import amap_geocode
 from .models import LocationData
 from .radar import download_radar_image, fetch_radar, fetch_radar_gif
 from .storage import LocationStore
+from .typhoon import (
+    NmcTyphoonNewsProvider,
+    TyphoonProvider,
+    TyphoonUnavailable,
+    download_typhoon_track_image,
+    format_typhoon_detail,
+    format_typhoon_help,
+    format_typhoon_list,
+    parse_typhoon_args,
+)
 
 if TYPE_CHECKING:
     from shinbot.core.dispatch.message_context import MessageContext
@@ -44,7 +55,11 @@ _HELP_TEXT = (
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
     "!雷达 北京 → 单站雷达 (省份或城市名)\n"
     "!雷达动图 → 全国雷达回波动画 (~2小时)\n\n"
-    "📊 4. 核心指标说明\n"
+    "🌀 4. 台风路径\n"
+    "!台风 → 查询中央气象台最新台风快讯\n"
+    "!台风 <名称或编号> → 查询当前快讯详情；若有对应路径页会附带路径预报图\n"
+    "  (数据源：中央气象台 NMC 台风快讯与路径预报图)\n\n"
+    "📊 5. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
     "• 露点风险: 红色代表极易结露，需保护器材\n"
@@ -98,8 +113,10 @@ def register_commands(
     config: Any,
     store: LocationStore,
     template_path: Path,
+    typhoon_provider: TyphoonProvider | None = None,
 ) -> None:
-    """Register 晴天钟 and 设置位置 commands on *plg*."""
+    """Register AstroAssist commands on *plg*."""
+    provider = typhoon_provider or NmcTyphoonNewsProvider()
 
     # ---- 晴天钟 ----
     @plg.on_command(
@@ -246,6 +263,51 @@ def register_commands(
         await _handle_radar_gif(ctx, raw_args.strip(), plg)
         ctx.stop()
 
+    # ---- 台风 ----
+    @plg.on_command(
+        "台风",
+        aliases=["typhoon"],
+        description="查询台风实时路径",
+        usage="!台风 [list|名称或编号]",
+    )
+    async def handle_typhoon(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        parsed = parse_typhoon_args(raw_args)
+
+        if parsed.action == "help":
+            await ctx.send(format_typhoon_help())
+            ctx.stop()
+            return
+
+        try:
+            if parsed.action == "list":
+                message = format_typhoon_list(await provider.list_active())
+                await ctx.send(message)
+            else:
+                detail = await provider.get_detail(parsed.query)
+                if isinstance(detail, TyphoonUnavailable):
+                    image_sent = await _send_typhoon_track_image(
+                        ctx,
+                        parsed.query,
+                        provider,
+                        plg,
+                    )
+                    if not image_sent:
+                        await ctx.send(format_typhoon_detail(detail))
+                else:
+                    await ctx.send(format_typhoon_detail(detail))
+                    await _send_typhoon_track_image(
+                        ctx,
+                        detail.summary.name or parsed.query,
+                        provider,
+                        plg,
+                    )
+        except Exception as exc:
+            _LOG.exception("AstroAssist typhoon query error")
+            message = f"❌ 台风数据查询失败: {exc}"
+            await ctx.send(message)
+
+        ctx.stop()
+
 
 async def _handle_radar_static(
     ctx: MessageContext, query: str, plg: Any,
@@ -295,3 +357,42 @@ async def _handle_radar_gif(
         msg += f"  ({time_range})"
     await ctx.send(msg)
     await ctx.send([MessageElement.img(str(gif_path))])
+
+
+async def _send_typhoon_track_image(
+    ctx: MessageContext,
+    query: str,
+    provider: TyphoonProvider,
+    plg: Any,
+) -> bool:
+    """Send the latest NMC typhoon path forecast image when available."""
+    if not hasattr(provider, "get_track_image"):
+        return False
+    image = await provider.get_track_image(query)
+    if isinstance(image, TyphoonUnavailable):
+        _LOG.info("AstroAssist typhoon track image unavailable: %s", image.message)
+        return False
+
+    suffix = Path(image.url.split("?", 1)[0]).suffix.lower() or ".jpg"
+    filename_label = _safe_filename_piece(image.name or query or "track")
+    img_path = Path(plg.data_dir) / f"typhoon_track_{filename_label}_{uuid4().hex}{suffix}"
+    try:
+        await download_typhoon_track_image(image.url, str(img_path))
+    except Exception as exc:
+        _LOG.exception("AstroAssist typhoon track image download error")
+        await ctx.send(f"⚠️ 台风路径图下载失败: {exc}")
+        return False
+
+    display_label = image.name or "台风路径预报"
+    msg = f"🌀 {display_label}路径预报图"
+    if image.time:
+        msg += f"  ({image.time})"
+    await ctx.send(msg)
+    await ctx.send([MessageElement.img(str(img_path))])
+    return True
+
+
+def _safe_filename_piece(value: str) -> str:
+    """Return a short filesystem-safe label for generated image files."""
+    safe = re.sub(r"[^\w.-]+", "_", value.strip(), flags=re.UNICODE).strip("._-")
+    return safe[:40] or "track"
