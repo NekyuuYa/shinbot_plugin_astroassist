@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html style="width: 700px;" class="{{ theme_mode }}">
+<head>
+<style>
+    * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+
+    :root {
+        --bg-page: #F7F9FC; --bg-card: #F0F7FF;
+        --bg-header: linear-gradient(135deg, #E3F2FD 0%, #D1E9FF 100%);
+        --text-primary: #1A1C1E; --text-secondary: #44474E;
+        --border-color: #D1E2EE; --date-color: #1a73e8;
+        --row-border: #E1EBF7; --box-bg: #E1EBF7;
+        --legend-bg: #E8F2FC; --cloud-bg: #F0F7FF;
+        --cloud-fill: #FFFFFF; --cloud-border: #D1E2EE;
+        --transition-line: #94A3B8;
+    }
+
+    .night-mode {
+        --bg-page: #050505; --bg-card: #121212;
+        --bg-header: linear-gradient(135deg, #1A1C1E 0%, #0D1B2A 100%);
+        --text-primary: #E2E2E6; --text-secondary: #A0A0A5;
+        --border-color: #333333; --date-color: #4D96FF;
+        --row-border: #222222; --box-bg: #1E1E1E;
+        --legend-bg: #0A0A0A; --cloud-bg: #121212;
+
+        /* 夜间云量填充深色化 */
+        --cloud-fill: #415A77;
+        --cloud-border: #333333;
+        --transition-line: #555555;
+    }
+
+    body {
+        font-family: 'Inter', 'PingFang SC', sans-serif;
+        margin: 0; padding: 10px; background: var(--bg-page);
+        width: 700px; display: inline-block; color: var(--text-primary);
+    }
+    .card {
+        background: var(--bg-card); border-radius: 24px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2); overflow: hidden;
+        width: 680px; border: 1px solid var(--border-color);
+    }
+    .header { background: var(--bg-header); padding: 20px 25px; border-bottom: 1px solid var(--border-color); }
+    .header h1 { margin: 0; font-size: 28px; font-weight: 700; color: var(--text-primary); }
+    .header .meta { margin-top: 4px; font-size: 14px; opacity: 0.8; font-family: monospace; color: var(--text-secondary); }
+
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { padding: 10px 1px; font-size: 13px; color: var(--text-secondary); border-bottom: 2px solid var(--border-color); text-align: center; font-weight: 600; background: rgba(255,255,255,0.05); }
+    td { padding: 4px 1px; text-align: center; height: 56px; border-bottom: 1px solid var(--row-border); }
+
+    .date-col {
+        background: rgba(255,255,255,0.03); font-size: 26px; font-weight: 900; color: var(--date-color);
+        border-right: 3px solid var(--date-color) !important;
+        border-bottom: 4px solid var(--date-color) !important;
+    }
+    tr:last-of-type .date-col, tr:nth-last-child(1) td.date-col { border-bottom: none !important; }
+
+    .time-col { font-size: 22px; font-weight: 700; }
+    .solid-box { width: 40px; height: 40px; margin: 0 auto; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 800; font-family: monospace; }
+
+    .cloud-box { position: relative; width: 42px; height: 28px; background: var(--cloud-bg); margin: 0 auto; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 1px solid var(--cloud-border); }
+    .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--cloud-fill); z-index: 1; }
+    .val {
+        position: relative; z-index: 2; font-size: 12px; font-weight: 900; font-family: monospace;
+        color: #1A73E8;
+    }
+    .night-mode .val { color: #FFFFFF; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+
+    .transition-row td {
+        border-top: 2px dashed var(--transition-line); height: 36px; background: rgba(255,255,255,0.05);
+        font-size: 20px; font-weight: 800; color: var(--text-primary); padding: 0 15px; text-align: left;
+    }
+
+    /* 5 板块图例 */
+    .legend { padding: 15px 25px; background: var(--legend-bg); border-top: 1px solid var(--border-color); display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .legend-section { background: rgba(255,255,255,0.03); padding: 8px; border-radius: 10px; border: 1px solid var(--border-color); }
+    .legend-full { grid-column: span 3; }
+    .legend-title { font-size: 12px; font-weight: 700; margin-bottom: 5px; border-left: 3px solid var(--date-color); padding-left: 6px; color: var(--text-primary); }
+    .legend-grid { display: flex; flex-wrap: wrap; gap: 5px; }
+    .legend-item { display: flex; align-items: center; font-size: 9px; color: var(--text-secondary); gap: 3px; }
+    .legend-color { width: 10px; height: 10px; border-radius: 2px; border: 1px solid var(--border-color); }
+
+    .footer { padding: 12px; text-align: center; font-size: 12px; color: var(--text-secondary); opacity: 0.6; }
+</style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <h1>🔭 {{ location_name }}气象预报</h1>
+            <div class="meta">📍 {{ lat }}, {{ lon }} | {{ model_name }}</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 60px;">日期</th>
+                    <th style="width: 45px;">时间</th>
+                    <th style="width: 50px;">气温</th>
+                    <th style="width: 50px;">露点</th>
+                    <th style="width: 50px;">湿度</th>
+                    <th style="width: 50px;">风速</th>
+                    <th style="width: 50px;">视宁</th>
+                    <th style="width: 50px;">透明</th>
+                    <th style="width: 48px;">总云</th>
+                    <th style="width: 48px;">低空</th>
+                    <th style="width: 48px;">中空</th>
+                    <th style="width: 48px;">高空</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                {% if row.is_transition %}
+                <tr class="transition-row">
+                    <td style="border-right: 3px solid var(--date-color); border-bottom: none; background: rgba(255,255,255,0.05);"></td>
+                    <td colspan="11">{{ row.label }}</td>
+                </tr>
+                {% else %}
+                <tr style="{{ 'background: rgba(255,255,255,0.02);' if loop.index0 % 2 == 0 }}">
+                    {% if row.is_first_of_day %}
+                    <td class="date-col" rowspan="{{ row.day_rowspan }}">{{ row.day }}</td>
+                    {% endif %}
+                    <td class="time-col">{{ row.hour }}</td>
+                    <td><div class="solid-box {{ row.temp_cls }}" style="background: {{ row.temp_color }};">{{ row.temp_val }}</div></td>
+                    <td><div class="solid-box {{ row.dew_cls }}" style="background: {{ row.dew_color }};">{{ row.dew_val }}</div></td>
+                    <td><div class="solid-box {{ row.humi_cls }}" style="background: {{ row.humi_color }};">{{ row.humi_val }}</div></td>
+                    <td><div class="solid-box {{ row.wind_cls }}" style="background: {{ row.wind_color }};">{{ row.wind_val }}</div></td>
+                    <td><div class="solid-box {{ row.seeing_cls }}" style="background: {{ row.seeing_color }};">{{ row.seeing_val }}</div></td>
+                    <td><div class="solid-box {{ row.trans_cls }}" style="background: {{ row.trans_color }};">{{ row.trans_val }}</div></td>
+                    <td><div class="cloud-box"><div class="fill" style="width: {{ row.total }}%;"></div><span class="val">{{ row.total }}</span></div></td>
+                    <td><div class="cloud-box"><div class="fill" style="width: {{ row.low }}%;"></div><span class="val">{{ row.low }}</span></div></td>
+                    <td><div class="cloud-box"><div class="fill" style="width: {{ row.mid }}%;"></div><span class="val">{{ row.mid }}</span></div></td>
+                    <td><div class="cloud-box"><div class="fill" style="width: {{ row.high }}%;"></div><span class="val">{{ row.high }}</span></div></td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="legend">
+            <div class="legend-section legend-full">
+                <div class="legend-title">气温色阶 (°C)</div>
+                <div class="legend-grid">
+                    <div class="legend-item"><div class="legend-color" style="background: #003258;"></div>&lt;-10</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #D1E4FF;"></div>~0</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #C4E7CB;"></div>~8</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #A8C7FF;"></div>~16</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #E8F0FF;"></div>~24</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #FFECB3;"></div>~30</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #FFDAD6;"></div>~36</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #BA1A1A;"></div>~38</div>
+                    <div class="legend-item"><div class="legend-color" style="background: #4A148C;"></div>&gt;38</div>
+                </div>
+            </div>
+            <div class="legend-section"><div class="legend-title">风速等级</div><div class="legend-grid"><div class="legend-item"><div class="legend-color" style="background: #C4E7CB;"></div>微</div><div class="legend-item"><div class="legend-color" style="background: #A8C7FF;"></div>清</div><div class="legend-item"><div class="legend-color" style="background: #FFECB3;"></div>大</div><div class="legend-item"><div class="legend-color" style="background: #BA1A1A;"></div>强</div></div></div>
+            <div class="legend-section"><div class="legend-title">湿度 (%)</div><div class="legend-grid"><div class="legend-item"><div class="legend-color" style="background: #C4E7CB;"></div>&lt;40</div><div class="legend-item"><div class="legend-color" style="background: #A8C7FF;"></div>~70</div><div class="legend-item"><div class="legend-color" style="background: #FFECB3;"></div>~90</div><div class="legend-item"><div class="legend-color" style="background: #BA1A1A;"></div>&gt;90</div></div></div>
+            <div class="legend-section"><div class="legend-title">视宁/透明</div><div class="legend-grid"><div class="legend-item"><div class="legend-color" style="background: #10b981;"></div>1-2</div><div class="legend-item"><div class="legend-color" style="background: #3b82f6;"></div>3-4</div><div class="legend-item"><div class="legend-color" style="background: #f59e0b;"></div>5-6</div><div class="legend-item"><div class="legend-color" style="background: #BA1A1A;"></div>7-8</div></div></div>
+            <div class="legend-section legend-full"><div class="legend-title">风险状态</div><div class="legend-grid"><div class="legend-item"><div class="legend-color" style="background: #10b981;"></div>安全</div><div class="legend-item"><div class="legend-color" style="background: #f59e0b;"></div>中风险</div><div class="legend-item"><div class="legend-color" style="background: #ef4444;"></div>露点高危</div></div></div>
+        </div>
+        <div class="footer">AstroAssist 晴天钟助手 • v0.1.0</div>
+    </div>
+</body>
+</html>

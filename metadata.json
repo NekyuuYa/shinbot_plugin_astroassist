@@ -1,0 +1,10 @@
+{
+  "id": "shinbot_plugin_astroassist",
+  "name": "晴天钟助手",
+  "version": "0.1.0",
+  "author": "NekyuuYa",
+  "description": "调用 Open-Meteo 获取 ECMWF 云量数据，支持高德地图定位、专业天文指标与日夜主题切换。",
+  "entry": "shinbot_plugin_astroassist/__init__.py",
+  "role": "logic",
+  "permissions": ["cmd.astroassist"]
+}
