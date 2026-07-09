@@ -87,7 +87,7 @@ def _parse_latest(html: str) -> tuple[str, str]:
     """Extract the newest ``(image_url, obs_time)`` from a satellite page."""
     frames = _parse_frames(html)
     if not frames:
-        raise ValueError("页面中未找到卫星云图")
+        raise ValueError("页面中未找到海区云图")
     latest = frames[0]
     return latest["url"], latest["time"]
 
@@ -164,7 +164,7 @@ async def fetch_satellite_gif(
     html = await _fetch_page(page_path)
     frames = _parse_frames(html)
     if not frames:
-        raise ValueError("页面中未找到卫星云图")
+        raise ValueError("页面中未找到海区云图")
 
     frames = list(reversed(frames))
     urls = [frame["url"] for frame in frames]

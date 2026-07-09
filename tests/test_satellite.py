@@ -1,4 +1,4 @@
-"""Tests for NMC satellite image parsing and command wiring."""
+"""Tests for NMC sea-area cloud image parsing and command wiring."""
 
 from __future__ import annotations
 
@@ -114,11 +114,13 @@ def test_resolve_satellite_page_defaults_to_nmc_sea_infrared_product() -> None:
     )
 
 
-def test_register_commands_declares_satellite_commands(tmp_path: Path) -> None:
+def test_register_commands_declares_sea_cloud_commands(tmp_path: Path) -> None:
     plugin = _register(tmp_path)
 
-    assert plugin.commands["卫星云图"]["aliases"] == ["satellite", "sat"]
-    assert plugin.commands["卫星云图动图"]["aliases"] == ["satellitegif", "satgif"]
+    assert "卫星云图" not in plugin.commands
+    assert "卫星云图动图" not in plugin.commands
+    assert plugin.commands["海区云图"]["aliases"] == ["seacloud", "sea"]
+    assert plugin.commands["海区云图动图"]["aliases"] == ["seacloudgif", "seagif"]
 
 
 @pytest.mark.asyncio
@@ -144,7 +146,7 @@ async def test_radar_gif_command_sends_normal_image_subtype(
 
 
 @pytest.mark.asyncio
-async def test_satellite_command_sends_static_image(
+async def test_sea_cloud_command_sends_static_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import shinbot_plugin_astroassist.commands as commands
@@ -166,16 +168,16 @@ async def test_satellite_command_sends_static_image(
 
     plugin = _register(tmp_path)
     ctx = _Ctx()
-    await plugin.commands["卫星云图"]["handler"](ctx, "西北太平洋")
+    await plugin.commands["海区云图"]["handler"](ctx, "西北太平洋")
 
     assert ctx.stopped is True
     assert "西北太平洋海区红外云图" in ctx.sent[0]
     assert ctx.sent[1][0]["type"] == "img"
-    assert Path(ctx.sent[1][0]["attrs"]["src"]).name.startswith("satellite_latest_")
+    assert Path(ctx.sent[1][0]["attrs"]["src"]).name.startswith("sea_cloud_latest_")
 
 
 @pytest.mark.asyncio
-async def test_satellite_gif_command_sends_normal_image_subtype(
+async def test_sea_cloud_gif_command_sends_normal_image_subtype(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import shinbot_plugin_astroassist.commands as commands
@@ -188,11 +190,11 @@ async def test_satellite_gif_command_sends_normal_image_subtype(
 
     plugin = _register(tmp_path)
     ctx = _Ctx()
-    await plugin.commands["卫星云图动图"]["handler"](ctx, "")
+    await plugin.commands["海区云图动图"]["handler"](ctx, "")
 
     assert ctx.stopped is True
     assert "07/09 22:00 → 07/09 23:00" in ctx.sent[0]
     image = ctx.sent[1][0]
     assert image["type"] == "img"
     assert image["attrs"]["sub_type"] == "0"
-    assert Path(image["attrs"]["src"]).name.startswith("satellite_animated_")
+    assert Path(image["attrs"]["src"]).name.startswith("sea_cloud_animated_")

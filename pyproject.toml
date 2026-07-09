@@ -1,6 +1,6 @@
 [project]
 name = "shinbot-plugin-astroassist"
-version = "0.1.3"
+version = "0.1.4"
 description = "晴天钟助手 — 天文气象看板，基于 Open-Meteo ECMWF + 7Timer! + NMC 数据。"
 readme = "README.md"
 requires-python = ">=3.12"

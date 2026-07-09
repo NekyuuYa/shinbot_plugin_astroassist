@@ -171,6 +171,25 @@ def _register(tmp_path: Path, *, typhoon_provider: Any | None = None) -> _FakePl
     return plugin
 
 
+def _patch_sea_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    async def fake_fetch(query: str) -> tuple[str, str, str]:
+        assert query == ""
+        return (
+            "https://image.nmc.cn/product/2026/07/09/WXSP/medium/sea.png?v=1",
+            "07/09 23:00",
+            "海区红外云图",
+        )
+
+    async def fake_download(url: str, dest: Path) -> None:
+        assert "sea.png" in url
+        dest.write_bytes(b"sea")
+
+    monkeypatch.setattr(commands, "fetch_satellite", fake_fetch)
+    monkeypatch.setattr(commands, "download_satellite_image", fake_download)
+
+
 @pytest.mark.parametrize(
     ("raw", "action", "query"),
     [
@@ -504,7 +523,12 @@ async def test_typhoon_command_default_provider_reports_nmc_summary(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_typhoon_command_uses_injected_provider_for_detail(tmp_path: Path) -> None:
+async def test_typhoon_command_uses_injected_provider_for_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_sea_cloud(monkeypatch)
+
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
             return []
@@ -520,8 +544,12 @@ async def test_typhoon_command_uses_injected_provider_for_detail(tmp_path: Path)
     await plugin.commands["台风"]["handler"](ctx, "2501")
 
     assert ctx.stopped
-    assert "2501 测试台风" in ctx.sent[-1]
-    assert "25 m/s" in ctx.sent[-1]
+    folded = ctx.sent[-1][0]
+    assert "2501 测试台风" in folded["children"][0]["children"][0]["attrs"]["content"]
+    assert "25 m/s" in folded["children"][0]["children"][0]["attrs"]["content"]
+    assert "海区红外云图（台风环境参考）" in folded["children"][1]["children"][0]["attrs"]["content"]
+    image_src = folded["children"][1]["children"][1]["attrs"]["src"]
+    assert Path(image_src).name.startswith("typhoon_sea_cloud_")
 
 
 @pytest.mark.asyncio
@@ -533,6 +561,8 @@ async def test_typhoon_command_sends_track_image(
 
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
+
+    _patch_sea_cloud(monkeypatch)
 
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
@@ -564,6 +594,9 @@ async def test_typhoon_command_sends_track_image(
     first_src = folded["children"][1]["children"][1]["attrs"]["src"]
     assert Path(first_src).name.startswith("typhoon_track_")
     assert Path(first_src).suffix == ".jpg"
+    sea_src = folded["children"][2]["children"][1]["attrs"]["src"]
+    assert "海区红外云图（台风环境参考）" in folded["children"][2]["children"][0]["attrs"]["content"]
+    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
 
     second_ctx = _Ctx()
     await plugin.commands["台风"]["handler"](second_ctx, "2501")
@@ -584,6 +617,8 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
 
+    _patch_sea_cloud(monkeypatch)
+
     async def fetch_html() -> str:
         return _NMC_SAMPLE_HTML
 
@@ -603,11 +638,14 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     folded = ctx.sent[-1][0]
     assert folded["type"] == "message"
     assert folded["attrs"] == {"forward": "true"}
-    assert len(folded["children"]) == 1
+    assert len(folded["children"]) == 2
     assert "美莎克路径预报图" in folded["children"][0]["children"][0]["attrs"]["content"]
     image_src = folded["children"][0]["children"][1]["attrs"]["src"]
     assert Path(image_src).name.startswith("typhoon_track_")
     assert Path(image_src).suffix == ".jpg"
+    assert "海区红外云图（台风环境参考）" in folded["children"][1]["children"][0]["attrs"]["content"]
+    sea_src = folded["children"][1]["children"][1]["attrs"]["src"]
+    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
 
 
 @pytest.mark.asyncio
@@ -619,6 +657,8 @@ async def test_typhoon_command_falls_back_without_onebot_forward_support(
 
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
+
+    _patch_sea_cloud(monkeypatch)
 
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
@@ -642,10 +682,13 @@ async def test_typhoon_command_falls_back_without_onebot_forward_support(
     await plugin.commands["台风"]["handler"](ctx, "2501")
 
     assert ctx.stopped
-    assert len(ctx.sent) == 3
+    assert len(ctx.sent) == 5
     assert "2501 测试台风" in ctx.sent[0]
     assert "测试台风路径预报图" in ctx.sent[1]
     assert ctx.sent[2][0]["type"] == "img"
     image_src = ctx.sent[2][0]["attrs"]["src"]
     assert Path(image_src).name.startswith("typhoon_track_")
     assert Path(image_src).suffix == ".jpg"
+    assert "海区红外云图（台风环境参考）" in ctx.sent[3]
+    sea_src = ctx.sent[4][0]["attrs"]["src"]
+    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")

@@ -1,4 +1,4 @@
-"""Command handlers for 晴天钟, 设置位置, 雷达, 卫星云图 and 台风."""
+"""Command handlers for 晴天钟, 设置位置, 雷达, 海区云图 and 台风."""
 
 from __future__ import annotations
 
@@ -61,10 +61,10 @@ _HELP_TEXT = (
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
     "!雷达 北京 → 单站雷达 (省份或城市名)\n"
     "!雷达动图 → 全国雷达回波动画 (~2小时)\n\n"
-    "🛰️ 4. 卫星云图\n"
-    "!卫星云图 → 获取最新海区红外云图\n"
-    "!卫星云图 西北太平洋 → 西北太平洋海区红外云图\n"
-    "!卫星云图动图 → 海区红外云图动画\n\n"
+    "🌊 4. 海区云图\n"
+    "!海区云图 → 获取最新海区红外云图\n"
+    "!海区云图 西北太平洋 → 西北太平洋海区红外云图\n"
+    "!海区云图动图 → 海区红外云图动画\n\n"
     "🌀 5. 台风路径\n"
     "!台风 → 查询中央气象台最新台风快讯\n"
     "!台风 <名称或编号> → 查询当前快讯详情；若有对应路径页会附带路径预报图\n"
@@ -273,26 +273,26 @@ def register_commands(
         await _handle_radar_gif(ctx, raw_args.strip(), plg)
         ctx.stop()
 
-    # ---- 卫星云图 ----
+    # ---- 海区云图 ----
     @plg.on_command(
-        "卫星云图",
-        aliases=["satellite", "sat"],
-        description="获取最新中央气象台卫星云图",
-        usage="!卫星云图 [产品名]",
+        "海区云图",
+        aliases=["seacloud", "sea"],
+        description="获取最新中央气象台海区红外云图",
+        usage="!海区云图 [产品名]",
     )
-    async def handle_satellite(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
-        await _handle_satellite_static(ctx, raw_args.strip(), plg)
+    async def handle_sea_cloud(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        await _handle_sea_cloud_static(ctx, raw_args.strip(), plg)
         ctx.stop()
 
-    # ---- 卫星云图动图 ----
+    # ---- 海区云图动图 ----
     @plg.on_command(
-        "卫星云图动图",
-        aliases=["satellitegif", "satgif"],
-        description="获取中央气象台卫星云图动画",
-        usage="!卫星云图动图 [产品名]",
+        "海区云图动图",
+        aliases=["seacloudgif", "seagif"],
+        description="获取中央气象台海区红外云图动画",
+        usage="!海区云图动图 [产品名]",
     )
-    async def handle_satellite_gif(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
-        await _handle_satellite_gif(ctx, raw_args.strip(), plg)
+    async def handle_sea_cloud_gif(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        await _handle_sea_cloud_gif(ctx, raw_args.strip(), plg)
         ctx.stop()
 
     # ---- 台风 ----
@@ -392,53 +392,49 @@ async def _handle_radar_gif(
     await ctx.send([MessageElement.img(str(gif_path), sub_type="0")])
 
 
-async def _handle_satellite_static(
+async def _handle_sea_cloud_static(
     ctx: MessageContext,
     query: str,
     plg: Any,
 ) -> None:
-    """Send the latest single satellite frame."""
+    """Send the latest single sea-area cloud frame."""
     try:
         url, obs_time, label = await fetch_satellite(query)
     except Exception as exc:
-        _LOG.exception("AstroAssist satellite fetch error")
-        await ctx.send(f"❌ 卫星云图获取失败: {exc}")
+        _LOG.exception("AstroAssist sea cloud fetch error")
+        await ctx.send(f"❌ 海区云图获取失败: {exc}")
         return
 
-    suffix = Path(url.split("?", 1)[0]).suffix.lower() or ".png"
-    img_path = Path(plg.data_dir) / f"satellite_latest_{uuid4().hex}{suffix}"
     try:
-        await download_satellite_image(url, img_path)
+        img_path = await _download_sea_cloud_image(plg, url, prefix="sea_cloud_latest")
     except Exception as exc:
-        _LOG.exception("AstroAssist satellite download error")
-        await ctx.send(f"❌ 卫星云图下载失败: {exc}")
+        _LOG.exception("AstroAssist sea cloud download error")
+        await ctx.send(f"❌ 海区云图下载失败: {exc}")
         return
 
-    msg = f"🛰️ {label}"
-    if obs_time:
-        msg += f"  ({obs_time})"
+    msg = _format_sea_cloud_caption(label, obs_time)
     await ctx.send(msg)
     await ctx.send([MessageElement.img(str(img_path))])
 
 
-async def _handle_satellite_gif(
+async def _handle_sea_cloud_gif(
     ctx: MessageContext,
     query: str,
     plg: Any,
 ) -> None:
-    """Send an animated satellite GIF."""
+    """Send an animated sea-area cloud GIF."""
     try:
         gif_bytes, newest, oldest, label = await fetch_satellite_gif(query)
     except Exception as exc:
-        _LOG.exception("AstroAssist satellite GIF error")
-        await ctx.send(f"❌ 卫星云图动图生成失败: {exc}")
+        _LOG.exception("AstroAssist sea cloud GIF error")
+        await ctx.send(f"❌ 海区云图动图生成失败: {exc}")
         return
 
-    gif_path = Path(plg.data_dir) / f"satellite_animated_{uuid4().hex}.gif"
+    gif_path = Path(plg.data_dir) / f"sea_cloud_animated_{uuid4().hex}.gif"
     gif_path.write_bytes(gif_bytes)
 
     time_range = f"{oldest} → {newest}" if newest and oldest else newest
-    msg = f"🛰️ {label}动图"
+    msg = f"🌊 {label}动图"
     if time_range:
         msg += f"  ({time_range})"
     await ctx.send(msg)
@@ -452,31 +448,48 @@ async def _send_typhoon_response(
     provider: TyphoonProvider,
     plg: Any,
 ) -> bool:
-    """Send typhoon text and track image, preferring folded chat records."""
+    """Send typhoon text, track image, and static sea cloud image."""
+    warnings: list[str] = []
+    track_payload: tuple[TyphoonTrackImage, Path] | None = None
     try:
-        payload = await _prepare_typhoon_track_image(query, provider, plg)
+        track_payload = await _prepare_typhoon_track_image(query, provider, plg)
     except Exception as exc:
         _LOG.exception("AstroAssist typhoon track image download error")
-        if text:
-            await ctx.send(text)
-        await ctx.send(f"⚠️ 台风路径图下载失败: {exc}")
-        return bool(text)
+        warnings.append(f"⚠️ 台风路径图下载失败: {exc}")
 
-    if payload is None:
-        if text:
-            await ctx.send(text)
-            return True
+    if text is None and track_payload is None:
         return False
 
-    image, img_path = payload
-    caption = _format_typhoon_track_caption(image)
-    if await _send_typhoon_forward_message(ctx, text, caption, img_path):
+    sea_cloud_payload: tuple[str, Path] | None = None
+    try:
+        sea_cloud_payload = await _prepare_typhoon_sea_cloud_image(plg)
+    except Exception as exc:
+        _LOG.exception("AstroAssist typhoon sea cloud image download error")
+        warnings.append(f"⚠️ 海区云图下载失败: {exc}")
+
+    if await _send_typhoon_forward_message(
+        ctx,
+        text,
+        warnings,
+        track_payload,
+        sea_cloud_payload,
+    ):
         return True
 
     if text:
         await ctx.send(text)
-    await ctx.send(caption)
-    await ctx.send([MessageElement.img(str(img_path))])
+    for warning in warnings:
+        await ctx.send(warning)
+
+    if track_payload is not None:
+        image, img_path = track_payload
+        await ctx.send(_format_typhoon_track_caption(image))
+        await ctx.send([MessageElement.img(str(img_path))])
+
+    if sea_cloud_payload is not None:
+        caption, img_path = sea_cloud_payload
+        await ctx.send(caption)
+        await ctx.send([MessageElement.img(str(img_path))])
     return True
 
 
@@ -500,11 +513,26 @@ async def _prepare_typhoon_track_image(
     return image, img_path
 
 
+async def _prepare_typhoon_sea_cloud_image(plg: Any) -> tuple[str, Path]:
+    """Download the latest static sea-area cloud image for typhoon context."""
+    url, obs_time, label = await fetch_satellite("")
+    img_path = await _download_sea_cloud_image(plg, url, prefix="typhoon_sea_cloud")
+    return _format_sea_cloud_caption(label, obs_time, note="（台风环境参考）"), img_path
+
+
+async def _download_sea_cloud_image(plg: Any, url: str, *, prefix: str) -> Path:
+    suffix = Path(url.split("?", 1)[0]).suffix.lower() or ".png"
+    img_path = Path(plg.data_dir) / f"{prefix}_{uuid4().hex}{suffix}"
+    await download_satellite_image(url, img_path)
+    return img_path
+
+
 async def _send_typhoon_forward_message(
     ctx: MessageContext,
     text: str | None,
-    caption: str,
-    img_path: Path,
+    warnings: list[str],
+    track_payload: tuple[TyphoonTrackImage, Path] | None,
+    sea_cloud_payload: tuple[str, Path] | None,
 ) -> bool:
     """Try to send typhoon output as a collapsed chat-record message."""
     if not _supports_onebot_forward_message(ctx):
@@ -513,18 +541,41 @@ async def _send_typhoon_forward_message(
     text_factory = getattr(MessageElement, "text", None)
     message_factory = getattr(MessageElement, "message", None)
     forward_factory = getattr(MessageElement, "forward", None)
-    if not (callable(text_factory) and callable(message_factory) and callable(forward_factory)):
+    if not (
+        callable(text_factory)
+        and callable(message_factory)
+        and callable(forward_factory)
+    ):
         return False
 
     nodes: list[Any] = []
     if text:
         nodes.append(message_factory([text_factory(text)], nickname="AstroAssist"))
-    nodes.append(
-        message_factory(
-            [text_factory(caption), MessageElement.img(str(img_path))],
-            nickname="AstroAssist",
+    if warnings:
+        nodes.append(
+            message_factory([text_factory("\n".join(warnings))], nickname="AstroAssist")
         )
-    )
+    if track_payload is not None:
+        image, img_path = track_payload
+        nodes.append(
+            message_factory(
+                [
+                    text_factory(_format_typhoon_track_caption(image)),
+                    MessageElement.img(str(img_path)),
+                ],
+                nickname="AstroAssist",
+            )
+        )
+    if sea_cloud_payload is not None:
+        caption, img_path = sea_cloud_payload
+        nodes.append(
+            message_factory(
+                [text_factory(caption), MessageElement.img(str(img_path))],
+                nickname="AstroAssist",
+            )
+        )
+    if not nodes:
+        return False
     try:
         await ctx.send([forward_factory(nodes)])
     except Exception:
@@ -550,6 +601,13 @@ def _format_typhoon_track_caption(image: TyphoonTrackImage) -> str:
     msg = f"🌀 {display_label}路径预报图"
     if image.time:
         msg += f"  ({image.time})"
+    return msg
+
+
+def _format_sea_cloud_caption(label: str, obs_time: str, *, note: str = "") -> str:
+    msg = f"🌊 {label}{note}"
+    if obs_time:
+        msg += f"  ({obs_time})"
     return msg
 
 
