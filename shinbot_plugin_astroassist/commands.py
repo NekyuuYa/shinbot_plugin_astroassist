@@ -451,7 +451,14 @@ async def _send_typhoon_forward_message(
 
 def _supports_onebot_forward_message(ctx: MessageContext) -> bool:
     adapter = getattr(ctx, "adapter", None)
-    return str(getattr(adapter, "platform", "") or "").lower() == "onebot_v11"
+    adapter_platform = str(getattr(adapter, "platform", "") or "").lower()
+    if adapter_platform in {"onebot_v11", "onebot", "qq"}:
+        return True
+
+    adapter_type = type(adapter)
+    adapter_type_name = adapter_type.__name__.lower()
+    adapter_module = adapter_type.__module__.lower()
+    return "onebot" in adapter_type_name or "shinbot_adapter_onebot_v11" in adapter_module
 
 
 def _format_typhoon_track_caption(image: TyphoonTrackImage) -> str:

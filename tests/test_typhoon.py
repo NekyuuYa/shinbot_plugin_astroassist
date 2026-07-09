@@ -324,6 +324,27 @@ def test_parse_nmc_typhoon_track_pages_html_ignores_page_chrome_links() -> None:
     ]
 
 
+def test_typhoon_forward_support_detects_onebot_shapes() -> None:
+    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+
+    class OneBotV11Adapter:
+        platform = ""
+
+    assert commands._supports_onebot_forward_message(
+        SimpleNamespace(adapter=SimpleNamespace(platform="onebot_v11"))
+    )
+    assert commands._supports_onebot_forward_message(
+        SimpleNamespace(adapter=SimpleNamespace(platform="qq"))
+    )
+    assert commands._supports_onebot_forward_message(SimpleNamespace(adapter=OneBotV11Adapter()))
+    assert not commands._supports_onebot_forward_message(
+        SimpleNamespace(adapter=SimpleNamespace(platform="satori"))
+    )
+    assert not commands._supports_onebot_forward_message(
+        SimpleNamespace(adapter=SimpleNamespace(platform="qqofficial"))
+    )
+
+
 @pytest.mark.asyncio
 async def test_nmc_typhoon_provider_returns_latest_summary() -> None:
     async def fetch_html() -> str:
