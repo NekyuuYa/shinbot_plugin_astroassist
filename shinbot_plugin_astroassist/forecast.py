@@ -289,6 +289,8 @@ async def fetch_forecast(
 
         row: dict[str, object] = {
             "is_transition": False,
+            "is_first_of_day": False,
+            "day_rowspan": 0,
             "day": dt.strftime("%d"),
             "hour": dt.strftime("%H"),
             "temp_val": int(t_v),

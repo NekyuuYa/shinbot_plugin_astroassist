@@ -8,13 +8,9 @@ from typing import Any
 
 import pytest
 
-from plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands import (
-    register_commands,
-)
-from plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.storage import (
-    LocationStore,
-)
-from plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.typhoon import (
+from shinbot_plugin_astroassist.commands import register_commands
+from shinbot_plugin_astroassist.storage import LocationStore
+from shinbot_plugin_astroassist.typhoon import (
     NmcTyphoonNewsProvider,
     TyphoonDetail,
     TyphoonSummary,
@@ -325,7 +321,7 @@ def test_parse_nmc_typhoon_track_pages_html_ignores_page_chrome_links() -> None:
 
 
 def test_typhoon_forward_support_detects_onebot_shapes() -> None:
-    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+    import shinbot_plugin_astroassist.commands as commands
 
     class OneBotV11Adapter:
         platform = ""
@@ -533,7 +529,7 @@ async def test_typhoon_command_sends_track_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+    import shinbot_plugin_astroassist.commands as commands
 
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
@@ -583,7 +579,7 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+    import shinbot_plugin_astroassist.commands as commands
 
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
@@ -619,7 +615,7 @@ async def test_typhoon_command_falls_back_without_onebot_forward_support(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import plugins.shinbot_plugin_astroassist.shinbot_plugin_astroassist.commands as commands
+    import shinbot_plugin_astroassist.commands as commands
 
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
