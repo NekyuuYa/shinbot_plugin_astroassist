@@ -23,7 +23,7 @@ _LOG = logging.getLogger(__name__)
 __plugin_name__ = "晴天钟助手"
 __plugin_description__ = (
     "调用 Open-Meteo 获取 ECMWF 云量数据，支持高德地图定位、专业天文指标、"
-    "雷达回波、海区云图与 NMC 台风快讯。"
+    "雷达回波、海区云图、NMC 台风快讯与 Dapiya 台风云图。"
 )
 
 

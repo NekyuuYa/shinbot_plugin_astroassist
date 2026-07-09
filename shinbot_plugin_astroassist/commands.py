@@ -10,6 +10,14 @@ from uuid import uuid4
 
 from shinbot.schema.elements import MessageElement
 
+from .dapiya_floater import (
+    DapiyaFloaterError,
+    DapiyaFloaterFrame,
+    download_dapiya_floater_image,
+    fetch_dapiya_floater,
+    fetch_dapiya_floater_gif,
+    normalize_dapiya_product,
+)
 from .forecast import fetch_forecast
 from .geo import amap_geocode
 from .models import LocationData
@@ -22,7 +30,9 @@ from .satellite import (
 from .storage import LocationStore
 from .typhoon import (
     NmcTyphoonNewsProvider,
+    TyphoonDetail,
     TyphoonProvider,
+    TyphoonSummary,
     TyphoonTrackImage,
     TyphoonUnavailable,
     download_typhoon_track_image,
@@ -68,7 +78,9 @@ _HELP_TEXT = (
     "🌀 5. 台风路径\n"
     "!台风 → 查询中央气象台最新台风快讯\n"
     "!台风 <名称或编号> → 查询当前快讯详情；若有对应路径页会附带路径预报图\n"
-    "  (数据源：中央气象台 NMC 台风快讯与路径预报图)\n\n"
+    "!台风云图 [名称或编号] [VIS|RGB|TRUECOLOR] → 查询 Dapiya 台风云图\n"
+    "!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR] → 查询 Dapiya 台风云图动画\n"
+    "  (数据源：中央气象台 NMC 台风快讯/路径图，Dapiya 台风云图)\n\n"
     "📊 6. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
@@ -295,6 +307,30 @@ def register_commands(
         await _handle_sea_cloud_gif(ctx, raw_args.strip(), plg)
         ctx.stop()
 
+    # ---- 台风云图 ----
+    @plg.on_command(
+        "台风云图",
+        aliases=["typhooncloud", "tccloud"],
+        description="获取 Dapiya 热带气旋 floater 云图",
+        usage="!台风云图 [名称或编号] [VIS|RGB|TRUECOLOR]",
+    )
+    async def handle_typhoon_cloud(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        await _handle_typhoon_cloud_static(ctx, raw_args.strip(), provider, plg)
+        ctx.stop()
+
+    # ---- 台风云图动图 ----
+    @plg.on_command(
+        "台风云图动图",
+        aliases=["typhooncloudgif", "tccloudgif"],
+        description="获取 Dapiya 热带气旋 floater 云图动画",
+        usage="!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR]",
+    )
+    async def handle_typhoon_cloud_gif(
+        ctx: MessageContext, raw_args: str
+    ) -> None:  # noqa: UP037
+        await _handle_typhoon_cloud_gif(ctx, raw_args.strip(), provider, plg)
+        ctx.stop()
+
     # ---- 台风 ----
     @plg.on_command(
         "台风",
@@ -441,6 +477,69 @@ async def _handle_sea_cloud_gif(
     await ctx.send([MessageElement.img(str(gif_path), sub_type="0")])
 
 
+async def _handle_typhoon_cloud_static(
+    ctx: MessageContext,
+    raw_args: str,
+    provider: TyphoonProvider,
+    plg: Any,
+) -> None:
+    """Send the latest Dapiya tropical cyclone floater frame."""
+    try:
+        query, product = _parse_typhoon_cloud_args(raw_args)
+        frame = await _fetch_dapiya_floater_for_query(query, product, provider)
+    except Exception as exc:
+        _LOG.exception("AstroAssist Dapiya typhoon cloud fetch error")
+        await ctx.send(f"❌ 台风云图获取失败: {exc}")
+        return
+
+    try:
+        img_path = await _download_dapiya_floater_frame(plg, frame, prefix="typhoon_cloud")
+    except Exception as exc:
+        _LOG.exception("AstroAssist Dapiya typhoon cloud download error")
+        await ctx.send(f"❌ 台风云图下载失败: {exc}")
+        return
+
+    await ctx.send(_format_typhoon_cloud_caption(frame))
+    await ctx.send([MessageElement.img(str(img_path))])
+
+
+async def _handle_typhoon_cloud_gif(
+    ctx: MessageContext,
+    raw_args: str,
+    provider: TyphoonProvider,
+    plg: Any,
+) -> None:
+    """Send a Dapiya tropical cyclone floater GIF."""
+    try:
+        query, product = _parse_typhoon_cloud_args(raw_args)
+        gif_bytes, newest, oldest = await _fetch_dapiya_floater_gif_for_query(
+            query,
+            product,
+            provider,
+        )
+    except Exception as exc:
+        _LOG.exception("AstroAssist Dapiya typhoon cloud GIF error")
+        await ctx.send(f"❌ 台风云图动图生成失败: {exc}")
+        return
+
+    gif_path = (
+        Path(plg.data_dir)
+        / f"typhoon_cloud_{newest.storm_id}_{newest.product}_{uuid4().hex}.gif"
+    )
+    gif_path.write_bytes(gif_bytes)
+
+    time_range = (
+        f"{oldest.time} → {newest.time}"
+        if oldest.time and newest.time
+        else newest.time
+    )
+    msg = _format_typhoon_cloud_caption(newest, suffix="动图")
+    if time_range:
+        msg += f"  ({time_range})"
+    await ctx.send(msg)
+    await ctx.send([MessageElement.img(str(gif_path), sub_type="0")])
+
+
 async def _send_typhoon_response(
     ctx: MessageContext,
     text: str | None,
@@ -448,7 +547,7 @@ async def _send_typhoon_response(
     provider: TyphoonProvider,
     plg: Any,
 ) -> bool:
-    """Send typhoon text, track image, and static sea cloud image."""
+    """Send typhoon text, track image, and static context cloud image."""
     warnings: list[str] = []
     track_payload: tuple[TyphoonTrackImage, Path] | None = None
     try:
@@ -462,7 +561,11 @@ async def _send_typhoon_response(
 
     sea_cloud_payload: tuple[str, Path] | None = None
     try:
-        sea_cloud_payload = await _prepare_typhoon_sea_cloud_image(plg)
+        sea_cloud_payload = await _prepare_typhoon_context_cloud_image(
+            query,
+            provider,
+            plg,
+        )
     except Exception as exc:
         _LOG.exception("AstroAssist typhoon sea cloud image download error")
         warnings.append(f"⚠️ 海区云图下载失败: {exc}")
@@ -513,6 +616,26 @@ async def _prepare_typhoon_track_image(
     return image, img_path
 
 
+async def _prepare_typhoon_context_cloud_image(
+    query: str,
+    provider: TyphoonProvider,
+    plg: Any,
+) -> tuple[str, Path]:
+    """Download the best static cloud image for typhoon context."""
+    try:
+        frame = await _fetch_dapiya_floater_for_query(query, "VIS", provider)
+        img_path = await _download_dapiya_floater_frame(
+            plg,
+            frame,
+            prefix="typhoon_cloud",
+        )
+        return _format_typhoon_cloud_caption(frame, note="（台风环境参考）"), img_path
+    except Exception:
+        _LOG.exception("AstroAssist Dapiya typhoon cloud unavailable; falling back")
+
+    return await _prepare_typhoon_sea_cloud_image(plg)
+
+
 async def _prepare_typhoon_sea_cloud_image(plg: Any) -> tuple[str, Path]:
     """Download the latest static sea-area cloud image for typhoon context."""
     url, obs_time, label = await fetch_satellite("")
@@ -520,10 +643,96 @@ async def _prepare_typhoon_sea_cloud_image(plg: Any) -> tuple[str, Path]:
     return _format_sea_cloud_caption(label, obs_time, note="（台风环境参考）"), img_path
 
 
+async def _fetch_dapiya_floater_for_query(
+    query: str,
+    product: str,
+    provider: TyphoonProvider,
+) -> DapiyaFloaterFrame:
+    last_error: DapiyaFloaterError | None = None
+    attempts = _dapiya_query_attempts(query)
+    for attempt in attempts:
+        try:
+            return await fetch_dapiya_floater(attempt, product=product)
+        except DapiyaFloaterError as exc:
+            last_error = exc
+            continue
+
+    enriched_query = await _enrich_typhoon_cloud_query(query, provider)
+    for attempt in _dapiya_query_attempts(enriched_query):
+        if attempt in attempts:
+            continue
+        try:
+            return await fetch_dapiya_floater(attempt, product=product)
+        except DapiyaFloaterError as exc:
+            last_error = exc
+            continue
+
+    raise last_error or DapiyaFloaterError(query or "默认热带气旋")
+
+
+async def _fetch_dapiya_floater_gif_for_query(
+    query: str,
+    product: str,
+    provider: TyphoonProvider,
+) -> tuple[bytes, DapiyaFloaterFrame, DapiyaFloaterFrame]:
+    last_error: DapiyaFloaterError | None = None
+    attempts = _dapiya_query_attempts(query)
+    for attempt in attempts:
+        try:
+            return await fetch_dapiya_floater_gif(attempt, product=product)
+        except DapiyaFloaterError as exc:
+            last_error = exc
+            continue
+
+    enriched_query = await _enrich_typhoon_cloud_query(query, provider)
+    for attempt in _dapiya_query_attempts(enriched_query):
+        if attempt in attempts:
+            continue
+        try:
+            return await fetch_dapiya_floater_gif(attempt, product=product)
+        except DapiyaFloaterError as exc:
+            last_error = exc
+            continue
+
+    raise last_error or DapiyaFloaterError(query or "默认热带气旋")
+
+
+async def _enrich_typhoon_cloud_query(query: str, provider: TyphoonProvider) -> str:
+    text = query.strip()
+    if not text or not hasattr(provider, "get_detail"):
+        return text
+
+    try:
+        detail = await provider.get_detail(text)
+    except Exception:
+        return text
+    if not isinstance(detail, TyphoonDetail):
+        return text
+
+    return _summary_cloud_query(detail.summary)
+
+
 async def _download_sea_cloud_image(plg: Any, url: str, *, prefix: str) -> Path:
     suffix = Path(url.split("?", 1)[0]).suffix.lower() or ".png"
     img_path = Path(plg.data_dir) / f"{prefix}_{uuid4().hex}{suffix}"
     await download_satellite_image(url, img_path)
+    return img_path
+
+
+async def _download_dapiya_floater_frame(
+    plg: Any,
+    frame: DapiyaFloaterFrame,
+    *,
+    prefix: str,
+) -> Path:
+    safe_storm = _safe_filename_piece(frame.storm_id or "storm")
+    safe_product = _safe_filename_piece(frame.product or "VIS")
+    suffix = Path(frame.url.split("?", 1)[0]).suffix.lower() or ".png"
+    img_path = (
+        Path(plg.data_dir)
+        / f"{prefix}_{safe_storm}_{safe_product}_{uuid4().hex}{suffix}"
+    )
+    await download_dapiya_floater_image(frame.url, img_path)
     return img_path
 
 
@@ -604,11 +813,67 @@ def _format_typhoon_track_caption(image: TyphoonTrackImage) -> str:
     return msg
 
 
+def _parse_typhoon_cloud_args(raw: str) -> tuple[str, str]:
+    args = raw.strip().split()
+    if not args:
+        return "", "VIS"
+
+    for width in (2, 1):
+        if len(args) < width:
+            continue
+        candidate = " ".join(args[-width:])
+        try:
+            product = normalize_dapiya_product(candidate)
+        except DapiyaFloaterError:
+            continue
+        return " ".join(args[:-width]), product
+
+    return raw.strip(), "VIS"
+
+
+def _dapiya_query_attempts(query: str) -> list[str]:
+    attempts: list[str] = []
+    for item in query.split():
+        _append_unique(attempts, item)
+    _append_unique(attempts, query.strip())
+    return attempts or [""]
+
+
+def _summary_cloud_query(summary: TyphoonSummary) -> str:
+    return " ".join(
+        item
+        for item in (summary.identifier, summary.name, summary.english_name)
+        if item
+    )
+
+
+def _format_typhoon_cloud_caption(
+    frame: DapiyaFloaterFrame,
+    *,
+    note: str = "",
+    suffix: str = "",
+) -> str:
+    display_label = " ".join(item for item in (frame.storm_id, frame.name) if item)
+    if not display_label:
+        display_label = "热带气旋"
+    msg = f"🛰️ {display_label}台风云图{suffix} {frame.product}{note}"
+    if frame.time:
+        msg += f"  ({frame.time})"
+    msg += "  来源：Dapiya"
+    return msg
+
+
 def _format_sea_cloud_caption(label: str, obs_time: str, *, note: str = "") -> str:
     msg = f"🌊 {label}{note}"
     if obs_time:
         msg += f"  ({obs_time})"
     return msg
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    text = value.strip()
+    if text and text not in items:
+        items.append(text)
 
 
 def _safe_filename_piece(value: str) -> str:

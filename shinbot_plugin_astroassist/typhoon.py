@@ -314,8 +314,10 @@ def format_typhoon_help() -> str:
         "!台风 → 查询中央气象台最新台风快讯\n"
         "!台风 list → 查询当前快讯摘要\n"
         "!台风 <名称或编号> → 查询当前快讯详情，并附带路径图与最新海区云图\n"
+        "!台风云图 [名称或编号] [VIS|RGB|TRUECOLOR] → Dapiya 云图，默认 VIS\n"
+        "!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR] → Dapiya 云图动画\n"
         "!typhoon <name-or-id> → 英文别名\n\n"
-        "数据源：中央气象台 NMC 台风快讯。"
+        "数据源：中央气象台 NMC 台风快讯；Dapiya 热带气旋云图。"
     )
 
 

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from shinbot_plugin_astroassist.commands import register_commands
+from shinbot_plugin_astroassist.dapiya_floater import DapiyaFloaterError, DapiyaFloaterFrame
 from shinbot_plugin_astroassist.storage import LocationStore
 from shinbot_plugin_astroassist.typhoon import (
     NmcTyphoonNewsProvider,
@@ -188,6 +189,46 @@ def _patch_sea_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(commands, "fetch_satellite", fake_fetch)
     monkeypatch.setattr(commands, "download_satellite_image", fake_download)
+
+
+def _patch_typhoon_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    async def fake_fetch(query: str, *, product: str = "VIS") -> DapiyaFloaterFrame:
+        return DapiyaFloaterFrame(
+            storm_id="09W",
+            name="BAVI",
+            product=product,
+            url=f"https://data.dapiya.cn/history/09W/{product}/latest.png",
+            time="2026-07-09 16:30:00",
+        )
+
+    async def fake_fetch_gif(
+        query: str, *, product: str = "VIS"
+    ) -> tuple[bytes, DapiyaFloaterFrame, DapiyaFloaterFrame]:
+        newest = DapiyaFloaterFrame(
+            storm_id="09W",
+            name="BAVI",
+            product=product,
+            url=f"https://data.dapiya.cn/history/09W/{product}/latest.png",
+            time="2026-07-09 16:30:00",
+        )
+        oldest = DapiyaFloaterFrame(
+            storm_id="09W",
+            name="BAVI",
+            product=product,
+            url=f"https://data.dapiya.cn/history/09W/{product}/oldest.png",
+            time="2026-07-09 16:00:00",
+        )
+        return b"gif", newest, oldest
+
+    async def fake_download(url: str, dest: Path) -> None:
+        assert "data.dapiya.cn" in url
+        dest.write_bytes(b"dapiya")
+
+    monkeypatch.setattr(commands, "fetch_dapiya_floater", fake_fetch)
+    monkeypatch.setattr(commands, "fetch_dapiya_floater_gif", fake_fetch_gif)
+    monkeypatch.setattr(commands, "download_dapiya_floater_image", fake_download)
 
 
 @pytest.mark.parametrize(
@@ -494,6 +535,9 @@ def test_register_commands_declares_typhoon_command(tmp_path: Path) -> None:
     assert "台风" in plugin.commands
     assert plugin.commands["台风"]["aliases"] == ["typhoon"]
     assert "名称或编号" in plugin.commands["台风"]["usage"]
+    assert plugin.commands["台风云图"]["aliases"] == ["typhooncloud", "tccloud"]
+    assert plugin.commands["台风云图动图"]["aliases"] == ["typhooncloudgif", "tccloudgif"]
+    assert "VIS|RGB|TRUECOLOR" in plugin.commands["台风云图"]["usage"]
 
 
 @pytest.mark.asyncio
@@ -505,6 +549,60 @@ async def test_typhoon_command_returns_help(tmp_path: Path) -> None:
 
     assert ctx.stopped
     assert "台风路径查询" in ctx.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_typhoon_cloud_command_defaults_to_vis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_typhoon_cloud(monkeypatch)
+    plugin = _register(tmp_path)
+    ctx = _Ctx()
+
+    await plugin.commands["台风云图"]["handler"](ctx, "BAVI")
+
+    assert ctx.stopped
+    assert "09W BAVI台风云图 VIS" in ctx.sent[0]
+    image_src = ctx.sent[1][0]["attrs"]["src"]
+    assert Path(image_src).name.startswith("typhoon_cloud_09W_VIS_")
+
+
+@pytest.mark.asyncio
+async def test_typhoon_cloud_command_accepts_truecolor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_typhoon_cloud(monkeypatch)
+    plugin = _register(tmp_path)
+    ctx = _Ctx()
+
+    await plugin.commands["台风云图"]["handler"](ctx, "BAVI TRUECOLOR")
+
+    assert ctx.stopped
+    assert "09W BAVI台风云图 TRUECOLOR" in ctx.sent[0]
+    image_src = ctx.sent[1][0]["attrs"]["src"]
+    assert Path(image_src).name.startswith("typhoon_cloud_09W_TRUECOLOR_")
+
+
+@pytest.mark.asyncio
+async def test_typhoon_cloud_gif_command_accepts_rgb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_typhoon_cloud(monkeypatch)
+    plugin = _register(tmp_path)
+    ctx = _Ctx()
+
+    await plugin.commands["台风云图动图"]["handler"](ctx, "BAVI RGB")
+
+    assert ctx.stopped
+    assert "09W BAVI台风云图动图 RGB" in ctx.sent[0]
+    assert "2026-07-09 16:00:00 → 2026-07-09 16:30:00" in ctx.sent[0]
+    image = ctx.sent[1][0]
+    assert image["type"] == "img"
+    assert image["attrs"]["sub_type"] == "0"
+    assert Path(image["attrs"]["src"]).name.startswith("typhoon_cloud_09W_RGB_")
 
 
 @pytest.mark.asyncio
@@ -527,7 +625,7 @@ async def test_typhoon_command_uses_injected_provider_for_detail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_sea_cloud(monkeypatch)
+    _patch_typhoon_cloud(monkeypatch)
 
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
@@ -547,9 +645,12 @@ async def test_typhoon_command_uses_injected_provider_for_detail(
     folded = ctx.sent[-1][0]
     assert "2501 测试台风" in folded["children"][0]["children"][0]["attrs"]["content"]
     assert "25 m/s" in folded["children"][0]["children"][0]["attrs"]["content"]
-    assert "海区红外云图（台风环境参考）" in folded["children"][1]["children"][0]["attrs"]["content"]
+    assert (
+        "09W BAVI台风云图 VIS（台风环境参考）"
+        in folded["children"][1]["children"][0]["attrs"]["content"]
+    )
     image_src = folded["children"][1]["children"][1]["attrs"]["src"]
-    assert Path(image_src).name.startswith("typhoon_sea_cloud_")
+    assert Path(image_src).name.startswith("typhoon_cloud_")
 
 
 @pytest.mark.asyncio
@@ -562,7 +663,7 @@ async def test_typhoon_command_sends_track_image(
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
 
-    _patch_sea_cloud(monkeypatch)
+    _patch_typhoon_cloud(monkeypatch)
 
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
@@ -595,8 +696,11 @@ async def test_typhoon_command_sends_track_image(
     assert Path(first_src).name.startswith("typhoon_track_")
     assert Path(first_src).suffix == ".jpg"
     sea_src = folded["children"][2]["children"][1]["attrs"]["src"]
-    assert "海区红外云图（台风环境参考）" in folded["children"][2]["children"][0]["attrs"]["content"]
-    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
+    assert (
+        "09W BAVI台风云图 VIS（台风环境参考）"
+        in folded["children"][2]["children"][0]["attrs"]["content"]
+    )
+    assert Path(sea_src).name.startswith("typhoon_cloud_")
 
     second_ctx = _Ctx()
     await plugin.commands["台风"]["handler"](second_ctx, "2501")
@@ -605,6 +709,53 @@ async def test_typhoon_command_sends_track_image(
     assert first_src != second_src
     assert Path(second_src).name.startswith("typhoon_track_")
     assert Path(second_src).suffix == ".jpg"
+
+
+@pytest.mark.asyncio
+async def test_typhoon_command_falls_back_to_sea_cloud_when_dapiya_misses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    async def fake_download(url: str, dest: str) -> None:
+        Path(dest).write_bytes(url.encode())
+
+    async def fake_dapiya_fetch(
+        query: str, *, product: str = "VIS"
+    ) -> DapiyaFloaterFrame:
+        raise DapiyaFloaterError("miss")
+
+    _patch_sea_cloud(monkeypatch)
+    monkeypatch.setattr(commands, "fetch_dapiya_floater", fake_dapiya_fetch)
+    monkeypatch.setattr(commands, "download_typhoon_track_image", fake_download)
+
+    class Provider:
+        async def list_active(self) -> list[TyphoonSummary]:
+            return []
+
+        async def get_detail(self, query: str) -> TyphoonDetail:
+            return TyphoonDetail(summary=TyphoonSummary(identifier=query, name="测试台风"))
+
+        async def get_track_image(self, query: str = "") -> TyphoonTrackImage:
+            return TyphoonTrackImage(
+                url="https://image.nmc.cn/product/typhoon.JPG?v=1",
+                time="07/06 17:00",
+                name="测试台风",
+            )
+
+    plugin = _register(tmp_path, typhoon_provider=Provider())
+    ctx = _Ctx()
+
+    await plugin.commands["台风"]["handler"](ctx, "2501")
+
+    folded = ctx.sent[-1][0]
+    assert (
+        "海区红外云图（台风环境参考）"
+        in folded["children"][2]["children"][0]["attrs"]["content"]
+    )
+    sea_src = folded["children"][2]["children"][1]["attrs"]["src"]
+    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
 
 
 @pytest.mark.asyncio
@@ -617,7 +768,7 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
 
-    _patch_sea_cloud(monkeypatch)
+    _patch_typhoon_cloud(monkeypatch)
 
     async def fetch_html() -> str:
         return _NMC_SAMPLE_HTML
@@ -643,9 +794,12 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
     image_src = folded["children"][0]["children"][1]["attrs"]["src"]
     assert Path(image_src).name.startswith("typhoon_track_")
     assert Path(image_src).suffix == ".jpg"
-    assert "海区红外云图（台风环境参考）" in folded["children"][1]["children"][0]["attrs"]["content"]
+    assert (
+        "09W BAVI台风云图 VIS（台风环境参考）"
+        in folded["children"][1]["children"][0]["attrs"]["content"]
+    )
     sea_src = folded["children"][1]["children"][1]["attrs"]["src"]
-    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
+    assert Path(sea_src).name.startswith("typhoon_cloud_")
 
 
 @pytest.mark.asyncio
@@ -658,7 +812,7 @@ async def test_typhoon_command_falls_back_without_onebot_forward_support(
     async def fake_download(url: str, dest: str) -> None:
         Path(dest).write_bytes(url.encode())
 
-    _patch_sea_cloud(monkeypatch)
+    _patch_typhoon_cloud(monkeypatch)
 
     class Provider:
         async def list_active(self) -> list[TyphoonSummary]:
@@ -689,6 +843,6 @@ async def test_typhoon_command_falls_back_without_onebot_forward_support(
     image_src = ctx.sent[2][0]["attrs"]["src"]
     assert Path(image_src).name.startswith("typhoon_track_")
     assert Path(image_src).suffix == ".jpg"
-    assert "海区红外云图（台风环境参考）" in ctx.sent[3]
+    assert "09W BAVI台风云图 VIS（台风环境参考）" in ctx.sent[3]
     sea_src = ctx.sent[4][0]["attrs"]["src"]
-    assert Path(sea_src).name.startswith("typhoon_sea_cloud_")
+    assert Path(sea_src).name.startswith("typhoon_cloud_")
