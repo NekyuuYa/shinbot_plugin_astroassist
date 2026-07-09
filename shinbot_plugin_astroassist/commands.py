@@ -1,4 +1,4 @@
-"""Command handlers for 晴天钟, 设置位置, 雷达 and 台风."""
+"""Command handlers for 晴天钟, 设置位置, 雷达, 卫星云图 and 台风."""
 
 from __future__ import annotations
 
@@ -14,6 +14,11 @@ from .forecast import fetch_forecast
 from .geo import amap_geocode
 from .models import LocationData
 from .radar import download_radar_image, fetch_radar, fetch_radar_gif
+from .satellite import (
+    download_satellite_image,
+    fetch_satellite,
+    fetch_satellite_gif,
+)
 from .storage import LocationStore
 from .typhoon import (
     NmcTyphoonNewsProvider,
@@ -56,11 +61,15 @@ _HELP_TEXT = (
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
     "!雷达 北京 → 单站雷达 (省份或城市名)\n"
     "!雷达动图 → 全国雷达回波动画 (~2小时)\n\n"
-    "🌀 4. 台风路径\n"
+    "🛰️ 4. 卫星云图\n"
+    "!卫星云图 → 获取最新海区红外云图\n"
+    "!卫星云图 西北太平洋 → 西北太平洋海区红外云图\n"
+    "!卫星云图动图 → 海区红外云图动画\n\n"
+    "🌀 5. 台风路径\n"
     "!台风 → 查询中央气象台最新台风快讯\n"
     "!台风 <名称或编号> → 查询当前快讯详情；若有对应路径页会附带路径预报图\n"
     "  (数据源：中央气象台 NMC 台风快讯与路径预报图)\n\n"
-    "📊 5. 核心指标说明\n"
+    "📊 6. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
     "• 露点风险: 红色代表极易结露，需保护器材\n"
@@ -264,6 +273,28 @@ def register_commands(
         await _handle_radar_gif(ctx, raw_args.strip(), plg)
         ctx.stop()
 
+    # ---- 卫星云图 ----
+    @plg.on_command(
+        "卫星云图",
+        aliases=["satellite", "sat"],
+        description="获取最新中央气象台卫星云图",
+        usage="!卫星云图 [产品名]",
+    )
+    async def handle_satellite(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        await _handle_satellite_static(ctx, raw_args.strip(), plg)
+        ctx.stop()
+
+    # ---- 卫星云图动图 ----
+    @plg.on_command(
+        "卫星云图动图",
+        aliases=["satellitegif", "satgif"],
+        description="获取中央气象台卫星云图动画",
+        usage="!卫星云图动图 [产品名]",
+    )
+    async def handle_satellite_gif(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        await _handle_satellite_gif(ctx, raw_args.strip(), plg)
+        ctx.stop()
+
     # ---- 台风 ----
     @plg.on_command(
         "台风",
@@ -358,7 +389,60 @@ async def _handle_radar_gif(
     if time_range:
         msg += f"  ({time_range})"
     await ctx.send(msg)
-    await ctx.send([MessageElement.img(str(gif_path))])
+    await ctx.send([MessageElement.img(str(gif_path), sub_type="0")])
+
+
+async def _handle_satellite_static(
+    ctx: MessageContext,
+    query: str,
+    plg: Any,
+) -> None:
+    """Send the latest single satellite frame."""
+    try:
+        url, obs_time, label = await fetch_satellite(query)
+    except Exception as exc:
+        _LOG.exception("AstroAssist satellite fetch error")
+        await ctx.send(f"❌ 卫星云图获取失败: {exc}")
+        return
+
+    suffix = Path(url.split("?", 1)[0]).suffix.lower() or ".png"
+    img_path = Path(plg.data_dir) / f"satellite_latest_{uuid4().hex}{suffix}"
+    try:
+        await download_satellite_image(url, img_path)
+    except Exception as exc:
+        _LOG.exception("AstroAssist satellite download error")
+        await ctx.send(f"❌ 卫星云图下载失败: {exc}")
+        return
+
+    msg = f"🛰️ {label}"
+    if obs_time:
+        msg += f"  ({obs_time})"
+    await ctx.send(msg)
+    await ctx.send([MessageElement.img(str(img_path))])
+
+
+async def _handle_satellite_gif(
+    ctx: MessageContext,
+    query: str,
+    plg: Any,
+) -> None:
+    """Send an animated satellite GIF."""
+    try:
+        gif_bytes, newest, oldest, label = await fetch_satellite_gif(query)
+    except Exception as exc:
+        _LOG.exception("AstroAssist satellite GIF error")
+        await ctx.send(f"❌ 卫星云图动图生成失败: {exc}")
+        return
+
+    gif_path = Path(plg.data_dir) / f"satellite_animated_{uuid4().hex}.gif"
+    gif_path.write_bytes(gif_bytes)
+
+    time_range = f"{oldest} → {newest}" if newest and oldest else newest
+    msg = f"🛰️ {label}动图"
+    if time_range:
+        msg += f"  ({time_range})"
+    await ctx.send(msg)
+    await ctx.send([MessageElement.img(str(gif_path), sub_type="0")])
 
 
 async def _send_typhoon_response(
