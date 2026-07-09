@@ -341,8 +341,7 @@ async def fetch_forecast(
         if day not in seen_days:
             row["is_first_of_day"] = True
             row["day_rowspan"] = sum(
-                1 for r in processed_rows
-                if not r.get("is_transition") and r.get("day") == day
+                1 for r in processed_rows if r.get("day") == day
             )
             seen_days.add(day)
 
