@@ -71,7 +71,10 @@ def setup(plg: Plugin) -> None:
         if caps.html:
             _LOG.info("RenderKit HTML backend available — rendering enabled.")
         else:
-            _LOG.warning("RenderKit installed but HTML backend unavailable. Install playwright.")
+            _LOG.warning(
+                "RenderKit installed but HTML backend unavailable. "
+                "Update or reinstall AstroAssist to sync the playwright dependency."
+            )
     except ImportError:
         _LOG.warning(
             "RenderKit not found — image rendering disabled. "

@@ -15,7 +15,8 @@
 
 ## 🚀 安装
 
-1. 确保已安装 `shinbot_plugin_renderkit`（提供 Playwright HTML 渲染）。
+1. 确保已安装 `shinbot_plugin_renderkit`（提供 HTML 渲染能力）。
+   AstroAssist 会通过自身 `pyproject.toml` 同步 `playwright` Python 依赖。
 2. 在 ShinBot 配置中启用本插件。
 3. 配置高德地图 API Key（Web服务类型）：
    ```toml
