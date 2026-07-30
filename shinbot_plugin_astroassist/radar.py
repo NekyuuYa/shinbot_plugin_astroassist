@@ -13,6 +13,7 @@ from the page, ~2 h of history).
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import re
 from pathlib import Path
@@ -109,6 +110,105 @@ _EXTRA_ALIASES: dict[str, str] = {
 }
 
 # ------------------------------------------------------------------
+# Pinyin / English aliases
+#
+# Keys are lowercase ASCII.  Where a romanisation is ambiguous (e.g.
+# "shanxi" covers both 山西 and 陕西) it maps to the *more common*
+# query; the other province should be written unambiguously.
+# ------------------------------------------------------------------
+_PINYIN_ALIASES: dict[str, str] = {
+    # Regions
+    "quanguo": "全国",
+    "china": "全国",
+    "national": "全国",
+    "huabei": "华北",
+    "north": "华北",
+    "dongbei": "东北",
+    "northeast": "东北",
+    "huadong": "华东",
+    "east": "华东",
+    "huazhong": "华中",
+    "central": "华中",
+    "huanan": "华南",
+    "south": "华南",
+    "xinan": "西南",
+    "southwest": "西南",
+    "xibei": "西北",
+    "northwest": "西北",
+    # Provinces / cities
+    "beijing": "北京",
+    "bj": "北京",
+    "tianjin": "天津",
+    "tj": "天津",
+    "hebei": "河北",
+    "shijiazhuang": "石家庄",
+    "shanxi": "山西",   # 山西 (Shanxi) — use "shaanxi" for 陕西
+    "taiyuan": "太原",
+    "neimenggu": "内蒙古",
+    "innermongolia": "内蒙古",
+    "erdos": "鄂尔多斯",
+    "liaoning": "辽宁",
+    "shenyang": "沈阳",
+    "jilin": "吉林",
+    "changchun": "长春",
+    "heilongjiang": "黑龙江",
+    "harbin": "哈尔滨",
+    "haerbin": "哈尔滨",
+    "shanghai": "上海",
+    "sh": "上海",
+    "qingpu": "青浦",
+    "jiangsu": "江苏",
+    "nanjing": "南京",
+    "zhejiang": "浙江",
+    "hangzhou": "杭州",
+    "anhui": "安徽",
+    "hefei": "合肥",
+    "fujian": "福建",
+    "fuzhou": "福州",
+    "jiangxi": "江西",
+    "nanchang": "南昌",
+    "shandong": "山东",
+    "jinan": "济南",
+    "henan": "河南",
+    "shangqiu": "商丘",
+    "hubei": "湖北",
+    "wuhan": "武汉",
+    "hunan": "湖南",
+    "changsha": "长沙",
+    "guangdong": "广东",  # maps via _EXTRA_ALIASES fallback
+    "guangxi": "广西",
+    "guilin": "桂林",
+    "hainan": "海南",
+    "haikou": "海口",
+    "chongqing": "重庆",
+    "cq": "重庆",
+    "sichuan": "四川",
+    "chengdu": "成都",
+    "guizhou": "贵州",
+    "guiyang": "贵阳",
+    "xizang": "西藏",
+    "tibet": "西藏",
+    "lasa": "拉萨",
+    "lhasa": "拉萨",
+    "shaanxi": "陕西",  # 陕西 (Shaanxi)
+    "xian": "西安",
+    "xi'an": "西安",
+    "gansu": "甘肃",
+    "lanzhou": "兰州",
+    "qinghai": "青海",
+    "xining": "西宁",
+    "ningxia": "宁夏",
+    "yinchuan": "银川",
+    "xinjiang": "新疆",
+    # Extra stations
+    "qujing": "曲靖",
+    "tacheng": "塔城",
+    "haituoshan": "海坨山",
+    "daxing": "大兴",
+    "shangchuandao": "上川岛",
+}
+
+# ------------------------------------------------------------------
 # HTML parsing
 # ------------------------------------------------------------------
 
@@ -168,45 +268,91 @@ def _parse_frames(html: str) -> list[dict[str, str]]:
 # ------------------------------------------------------------------
 
 
-def resolve_radar_page(query: str) -> str:
-    """Map a user query (e.g. "华北", "北京", "武汉") to an NMC page path.
+def resolve_radar_page(query: str) -> tuple[str, str] | None:
+    """Map a user query to ``(page_path, canonical_label)``.
 
     Search order:
     1. Exact match in ``_EXTRA_ALIASES`` (long-tail station names).
     2. Exact match in ``_ROUTES`` (provinces + regions).
-    3. Substring match in ``_ROUTES`` (first hit wins).
+    3. Pinyin / English alias lookup (case-insensitive).
+    4. Substring match in ``_ROUTES`` then ``_EXTRA_ALIASES``.
 
-    Returns ``"/publish/radar/chinaall.html"`` (national mosaic) as
-    fallback when nothing matches.
+    Returns ``None`` when nothing matches.
     """
     q = query.strip()
+    ql = q.lower()
 
-    # 1. Extra aliases (exact)
+    # 1. Extra aliases (exact Chinese)
     if q in _EXTRA_ALIASES:
-        return _EXTRA_ALIASES[q]
+        return _EXTRA_ALIASES[q], q
 
-    # 2. Exact match in main routes
+    # 2. Exact match in main routes (exact Chinese)
     if q in _ROUTES:
-        return _ROUTES[q]
+        return _ROUTES[q], q
 
-    # 3. Substring match — prefer longer keys first
+    # 3. Pinyin / English alias (case-insensitive)
+    if ql in _PINYIN_ALIASES:
+        canonical = _PINYIN_ALIASES[ql]
+        if canonical in _ROUTES:
+            return _ROUTES[canonical], canonical
+        if canonical in _EXTRA_ALIASES:
+            return _EXTRA_ALIASES[canonical], canonical
+
+    # 4. Substring match — prefer longer keys first
     for key in sorted(_ROUTES, key=len, reverse=True):
         if key in q or q in key:
-            return _ROUTES[key]
+            return _ROUTES[key], key
+    for key in sorted(_EXTRA_ALIASES, key=len, reverse=True):
+        if key in q or q in key:
+            return _EXTRA_ALIASES[key], key
 
-    # Fallback: national mosaic
-    return "/publish/radar/chinaall.html"
+    return None
+
+
+def suggest_radar_location(query: str) -> list[str]:
+    """Return up to 3 fuzzy-matched location names for an unrecognised query.
+
+    Tries Chinese name matching first; falls back to pinyin key matching.
+    Only used to build a helpful error message.
+    """
+    q = query.strip()
+    ql = q.lower()
+
+    # Try against all Chinese keys
+    chinese_keys = list(_ROUTES) + list(_EXTRA_ALIASES)
+    hits = difflib.get_close_matches(q, chinese_keys, n=3, cutoff=0.4)
+    if hits:
+        return hits
+
+    # Try against pinyin keys, map back to canonical Chinese
+    pinyin_hits = difflib.get_close_matches(ql, list(_PINYIN_ALIASES), n=3, cutoff=0.6)
+    seen: dict[str, None] = {}
+    for h in pinyin_hits:
+        seen[_PINYIN_ALIASES[h]] = None
+    return list(seen)
+
+
+def _known_locations() -> str:
+    """Return a compact sample of known query terms for error messages."""
+    regions = [k for k in _ROUTES if len(k) == 2 and "全" not in k][:8]
+    return "、".join(regions) + ' 等省市/区域，或直接输入"全国"'
 
 
 async def fetch_radar(query: str = "") -> tuple[str, str, str]:
     """High-level: fetch the latest radar image for *query*.
 
     Returns ``(image_url, obs_time, location_label)``.
+    Raises ``ValueError`` when *query* does not match any known location.
     """
-    page_path = resolve_radar_page(query) if query else "/publish/radar/chinaall.html"
-
-    # Derive a human-readable label from the matched key
-    label = "全国" if page_path == "/publish/radar/chinaall.html" else (query or "全国")
+    if query:
+        match = resolve_radar_page(query)
+        if match is None:
+            suggestions = suggest_radar_location(query)
+            hint = f"您是否想查询：{'、'.join(suggestions)}？" if suggestions else _known_locations()
+            raise ValueError(f"未识别的地名「{query}」。{hint}")
+        page_path, label = match
+    else:
+        page_path, label = "/publish/radar/chinaall.html", "全国"
 
     html = await _fetch_page(page_path)
     url, obs_time = _parse_latest(html)
@@ -254,8 +400,15 @@ async def fetch_radar_gif(
     """
     from shinbot_plugin_renderkit import GifRenderOptions, render_frames_to_gif
 
-    page_path = resolve_radar_page(query) if query else "/publish/radar/chinaall.html"
-    label = "全国" if page_path == "/publish/radar/chinaall.html" else (query or "全国")
+    if query:
+        match = resolve_radar_page(query)
+        if match is None:
+            suggestions = suggest_radar_location(query)
+            hint = f"您是否想查询：{'、'.join(suggestions)}？" if suggestions else _known_locations()
+            raise ValueError(f"未识别的地名「{query}」。{hint}")
+        page_path, label = match
+    else:
+        page_path, label = "/publish/radar/chinaall.html", "全国"
 
     html = await _fetch_page(page_path)
     frames = _parse_frames(html)
