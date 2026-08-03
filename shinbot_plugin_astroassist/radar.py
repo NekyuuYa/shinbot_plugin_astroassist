@@ -13,16 +13,20 @@ from the page, ~2 h of history).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import difflib
 import logging
+import math
 import re
 from pathlib import Path
 
 import httpx
 
+from .geo import GeocodeResult, amap_geocode, amap_geocode_detail
+
 _LOG = logging.getLogger(__name__)
 
-_BASE = "http://www.nmc.cn"
+_BASE = "https://www.nmc.cn"
 _GIF_FPS = 2  # frames per second (matches 6-min observation interval well)
 
 # ------------------------------------------------------------------
@@ -108,6 +112,76 @@ _EXTRA_ALIASES: dict[str, str] = {
     "海坨山": "/publish/tianqishikuang/leidatu/danzhanleida/beijing/haituoshan/index.html",
     "大兴": "/publish/radar/bei-jing/da-xing.htm",
 }
+
+
+@dataclass(frozen=True)
+class RadarStation:
+    """A single NMC radar page discovered from its province navigation."""
+
+    label: str
+    path: str
+    province: str
+
+
+@dataclass(frozen=True)
+class NearbyRadarStation:
+    """A station candidate and its geocoded distance from the request."""
+
+    station: RadarStation
+    distance_km: float
+
+
+# These are the province seed pages used by NMC's own "城市/地区" navigation.
+# The station table itself is parsed from those pages, so newly added NMC
+# stations do not require a code release.
+_PROVINCE_RADAR_PAGES: dict[str, str] = {
+    "北京": "/publish/radar/bei-jing/da-xing.htm",
+    "天津": "/publish/radar/tian-jin/tian-jin.htm",
+    "河北": "/publish/radar/he-bei/shi-jia-zhuang.htm",
+    "山西": "/publish/radar/shan-xi/tai-yuan.htm",
+    "内蒙古": "/publish/radar/nei-meng/e-er-duo-si.htm",
+    "辽宁": "/publish/radar/liao-ning/shen-yang.htm",
+    "吉林": "/publish/radar/ji-lin/chang-chun.htm",
+    "黑龙江": "/publish/radar/hei-long-jiang/ha-er-bin.htm",
+    "上海": "/publish/radar/shang-hai/qing-pu.htm",
+    "江苏": "/publish/radar/jiang-su/nan-jing.htm",
+    "浙江": "/publish/radar/zhe-jiang/hang-zhou.htm",
+    "安徽": "/publish/radar/an-hui/he-fei.htm",
+    "福建": "/publish/radar/fu-jian/fu-zhou.htm",
+    "江西": "/publish/radar/jiang-xi/nan-chang.htm",
+    "山东": "/publish/radar/shan-dong/ji-nan.htm",
+    "河南": "/publish/radar/he-nan/shang-qiu.htm",
+    "湖北": "/publish/radar/hu-bei/wu-han.htm",
+    "湖南": "/publish/radar/hu-nan/chang-sha.htm",
+    "广东": "/publish/radar/guang-dong/guang-zhou.htm",
+    "广西": "/publish/radar/guang-xi/gui-lin.htm",
+    "海南": "/publish/radar/hai-nan/hai-kou.htm",
+    "重庆": "/publish/radar/chong-qing/chong-qing.htm",
+    "四川": "/publish/radar/si-chuan/cheng-du.htm",
+    "贵州": "/publish/radar/gui-zhou/gui-yang.htm",
+    "云南": "/publish/radar/yun-nan/kun-ming.htm",
+    "西藏": "/publish/radar/xi-cang/la-sa.htm",
+    "陕西": "/publish/radar/shan-xi/xi-an.htm",
+    "甘肃": "/publish/radar/gan-su/lan-zhou.htm",
+    "青海": "/publish/radar/qing-hai/xi-ning.htm",
+    "宁夏": "/publish/radar/ning-xia/yin-chuan.htm",
+    "新疆": "/publish/radar/xin-jiang/wu-lu-mu-qi.htm",
+}
+
+_STATION_NAV_RE = re.compile(
+    r'<div\b[^>]*class=["\'][^"\']*\bp-nav\b[^"\']*\bnav3\b[^"\']*["\']'
+    r'[^>]*>(.*?)'
+    r'</div>\s*</div>\s*<div\b[^>]*class=["\'][^"\']*\brow\b',
+    re.DOTALL,
+)
+_STATION_LINK_RE = re.compile(
+    r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>([^<]+)</a>'
+)
+
+_STATION_TABLE_CACHE: dict[str, tuple[RadarStation, ...]] = {}
+_STATION_COORD_CACHE: dict[tuple[str, str], tuple[float, float]] = {}
+_TARGET_COORD_CACHE: dict[str, GeocodeResult] = {}
+_AUTO_NEARBY_RADIUS_KM = 180.0
 
 # ------------------------------------------------------------------
 # Pinyin / English aliases
@@ -332,27 +406,268 @@ def suggest_radar_location(query: str) -> list[str]:
     return list(seen)
 
 
+def _normalize_province(value: str) -> str | None:
+    """Map AMap's province/自治區 names to NMC's navigation labels."""
+    province = value.strip()
+    for canonical in _PROVINCE_RADAR_PAGES:
+        if province == canonical or province.startswith(canonical):
+            return canonical
+    return None
+
+
+def _parse_station_links(html: str, province: str) -> tuple[RadarStation, ...]:
+    """Parse NMC's real station links from the province page navigation."""
+    match = _STATION_NAV_RE.search(html)
+    if match is None:
+        return ()
+
+    stations: list[RadarStation] = []
+    seen_paths: set[str] = set()
+    for path, label in _STATION_LINK_RE.findall(match.group(1)):
+        path = path.strip()
+        label = re.sub(r"\s+", " ", label).strip()
+        if not label or path in seen_paths:
+            continue
+        if not (
+            path.startswith("/publish/radar/")
+            or path.startswith("/publish/tianqishikuang/leidatu/danzhanleida/")
+        ):
+            continue
+        if path == "/publish/radar/chinaall.html":
+            continue
+        seen_paths.add(path)
+        stations.append(RadarStation(label, path, province))
+    return tuple(stations)
+
+
+def _fallback_station_links(province: str) -> tuple[RadarStation, ...]:
+    """Use the checked-in route aliases if NMC navigation is unavailable."""
+    seed = _PROVINCE_RADAR_PAGES[province]
+    stations: list[RadarStation] = []
+    seen_paths: set[str] = set()
+    for label, path in (*_ROUTES.items(), *_EXTRA_ALIASES.items()):
+        # The checked-in table only guarantees each province's seed page.
+        # Do not infer a station from a shared URL directory: 山西 and 陕西
+        # both use ``shan-xi`` in NMC paths but are different provinces.
+        if path != seed or path in seen_paths:
+            continue
+        # Province and seed-city aliases can point at the same page.  A city
+        # label is more useful for distance/recommendation output.
+        if label == province:
+            continue
+        seen_paths.add(path)
+        stations.append(RadarStation(label, path, province))
+    return tuple(stations)
+
+
+async def _station_links_for_province(province: str) -> tuple[RadarStation, ...]:
+    """Fetch and cache one province's current NMC station table."""
+    cached = _STATION_TABLE_CACHE.get(province)
+    if cached is not None:
+        return cached
+
+    try:
+        html = await _fetch_page(_PROVINCE_RADAR_PAGES[province])
+        stations = _parse_station_links(html, province)
+    except Exception as exc:
+        _LOG.debug("Radar station navigation unavailable for %s: %s", province, exc)
+        stations = ()
+    if not stations:
+        stations = _fallback_station_links(province)
+    _STATION_TABLE_CACHE[province] = stations
+    return stations
+
+
+def _haversine_km(
+    latitude_a: float,
+    longitude_a: float,
+    latitude_b: float,
+    longitude_b: float,
+) -> float:
+    """Return the great-circle distance between two WGS-84 coordinates."""
+    earth_radius_km = 6371.0088
+    lat_a = math.radians(latitude_a)
+    lat_b = math.radians(latitude_b)
+    delta_lat = math.radians(latitude_b - latitude_a)
+    delta_lon = math.radians(longitude_b - longitude_a)
+    hav = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat_a) * math.cos(lat_b) * math.sin(delta_lon / 2) ** 2
+    )
+    return earth_radius_km * 2 * math.asin(math.sqrt(hav))
+
+
+def _rank_nearby_radar_stations(
+    latitude: float,
+    longitude: float,
+    stations: list[RadarStation],
+    station_coords: dict[tuple[str, str], tuple[float, float]],
+    *,
+    limit: int = 3,
+) -> list[NearbyRadarStation]:
+    """Rank geocoded NMC single-station pages by great-circle distance."""
+    if limit <= 0:
+        return []
+    candidates = [
+        NearbyRadarStation(
+            station=station,
+            distance_km=_haversine_km(
+                latitude,
+                longitude,
+                station_coords[(station.province, station.label)][0],
+                station_coords[(station.province, station.label)][1],
+            ),
+        )
+        for station in stations
+        if (station.province, station.label) in station_coords
+    ]
+    candidates.sort(key=lambda item: item.distance_km)
+    return candidates[:limit]
+
+
+async def _geocode_station_table(
+    stations: tuple[RadarStation, ...],
+    amap_key: str,
+) -> dict[tuple[str, str], tuple[float, float]]:
+    """Geocode station names concurrently, caching successful results."""
+    semaphore = asyncio.Semaphore(5)
+
+    async def geocode_station(station: RadarStation) -> None:
+        cache_key = (station.province, station.label)
+        if cache_key in _STATION_COORD_CACHE:
+            return
+        async with semaphore:
+            try:
+                latitude, longitude = await amap_geocode(
+                    f"{station.province}{station.label}",
+                    amap_key,
+                )
+            except Exception as exc:
+                _LOG.debug("Radar station geocoding failed for %s: %s", cache_key, exc)
+                return
+            _STATION_COORD_CACHE[cache_key] = (latitude, longitude)
+
+    await asyncio.gather(*(geocode_station(station) for station in stations))
+    return {
+        (station.province, station.label): _STATION_COORD_CACHE[(station.province, station.label)]
+        for station in stations
+        if (station.province, station.label) in _STATION_COORD_CACHE
+    }
+
+
+async def find_nearby_radar_stations(
+    query: str,
+    amap_key: str | None = None,
+    *,
+    limit: int = 3,
+) -> list[NearbyRadarStation]:
+    """Find current NMC stations near an unsupported place name.
+
+    Both the requested place and candidate stations are geocoded through the
+    existing AMap integration.  No station coordinate is handwritten in the
+    plugin.  NMC's province navigation supplies the station names and URLs.
+    """
+    if not amap_key:
+        return []
+
+    cache_key = query.strip()
+    try:
+        target = _TARGET_COORD_CACHE.get(cache_key)
+        if target is None:
+            target = await amap_geocode_detail(cache_key, amap_key)
+            _TARGET_COORD_CACHE[cache_key] = target
+        province = _normalize_province(target.province)
+        if province is None:
+            return []
+        stations = await _station_links_for_province(province)
+        station_coords = await _geocode_station_table(stations, amap_key)
+    except Exception as exc:
+        _LOG.debug("Radar nearby lookup failed for %r: %s", query, exc)
+        return []
+
+    return _rank_nearby_radar_stations(
+        target.latitude,
+        target.longitude,
+        list(stations),
+        station_coords,
+        limit=limit,
+    )
+
+
+def _format_nearby_stations(candidates: list[NearbyRadarStation]) -> str:
+    """Format nearby station candidates for a concise user-facing hint."""
+    return "、".join(
+        f"{item.station.label}（约{item.distance_km:.0f} km）" for item in candidates
+    )
+
+
+async def _resolve_radar_request(
+    query: str,
+    *,
+    amap_key: str | None = None,
+) -> tuple[str, str]:
+    """Resolve an exact, fuzzy, or geographic radar request."""
+    if not query.strip():
+        return "/publish/radar/chinaall.html", "全国"
+
+    match = resolve_radar_page(query)
+    # A province substring must not mask a more specific place, e.g.
+    # "江苏无锡".  Try the geocoded nearby-station path first in that case;
+    # if geocoding is unavailable, retaining the province route is a useful
+    # compatibility fallback.
+    try_nearby_first = bool(
+        match
+        and match[1] in _PROVINCE_RADAR_PAGES
+        and query.strip() not in {
+            match[1],
+            f"{match[1]}省",
+            f"{match[1]}市",
+            f"{match[1]}自治区",
+        }
+    )
+    if match is not None and not try_nearby_first:
+        return match
+
+    nearby = await find_nearby_radar_stations(query, amap_key)
+    if nearby and nearby[0].distance_km <= _AUTO_NEARBY_RADIUS_KM:
+        nearest = nearby[0]
+        label = (
+            f"{nearest.station.label}（{query.strip()}附近，"
+            f"约{nearest.distance_km:.0f} km）"
+        )
+        return nearest.station.path, label
+
+    if nearby:
+        raise ValueError(
+            f"未找到地名「{query}」对应的雷达站点。"
+            f"可尝试临近站点：{_format_nearby_stations(nearby)}。"
+        )
+
+    if match is not None:
+        return match
+
+    suggestions = suggest_radar_location(query)
+    hint = f"您是否想查询：{'、'.join(suggestions)}？" if suggestions else _known_locations()
+    if not amap_key:
+        hint += "（配置 amap_key 后可按地理位置推荐临近站点）"
+    raise ValueError(f"未识别的地名「{query}」。{hint}")
+
+
 def _known_locations() -> str:
     """Return a compact sample of known query terms for error messages."""
     regions = [k for k in _ROUTES if len(k) == 2 and "全" not in k][:8]
     return "、".join(regions) + ' 等省市/区域，或直接输入"全国"'
 
 
-async def fetch_radar(query: str = "") -> tuple[str, str, str]:
+async def fetch_radar(
+    query: str = "", *, amap_key: str | None = None
+) -> tuple[str, str, str]:
     """High-level: fetch the latest radar image for *query*.
 
     Returns ``(image_url, obs_time, location_label)``.
     Raises ``ValueError`` when *query* does not match any known location.
     """
-    if query:
-        match = resolve_radar_page(query)
-        if match is None:
-            suggestions = suggest_radar_location(query)
-            hint = f"您是否想查询：{'、'.join(suggestions)}？" if suggestions else _known_locations()
-            raise ValueError(f"未识别的地名「{query}」。{hint}")
-        page_path, label = match
-    else:
-        page_path, label = "/publish/radar/chinaall.html", "全国"
+    page_path, label = await _resolve_radar_request(query, amap_key=amap_key)
 
     html = await _fetch_page(page_path)
     url, obs_time = _parse_latest(html)
@@ -392,7 +707,7 @@ async def _download_all_frames(
 
 
 async def fetch_radar_gif(
-    query: str = "", *, max_frames: int = 20
+    query: str = "", *, max_frames: int = 20, amap_key: str | None = None
 ) -> tuple[bytes, str, str, str]:
     """Fetch radar data and return an animated GIF.
 
@@ -400,15 +715,7 @@ async def fetch_radar_gif(
     """
     from shinbot_plugin_renderkit import GifRenderOptions, render_frames_to_gif
 
-    if query:
-        match = resolve_radar_page(query)
-        if match is None:
-            suggestions = suggest_radar_location(query)
-            hint = f"您是否想查询：{'、'.join(suggestions)}？" if suggestions else _known_locations()
-            raise ValueError(f"未识别的地名「{query}」。{hint}")
-        page_path, label = match
-    else:
-        page_path, label = "/publish/radar/chinaall.html", "全国"
+    page_path, label = await _resolve_radar_request(query, amap_key=amap_key)
 
     html = await _fetch_page(page_path)
     frames = _parse_frames(html)

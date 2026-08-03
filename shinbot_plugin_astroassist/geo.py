@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 
 import httpx
@@ -86,12 +87,33 @@ def gcj02_to_wgs84(lng: float, lat: float) -> tuple[float, float]:
 _GEOCODE_URL = "https://restapi.amap.com/v3/geocode/geo"
 
 
-async def amap_geocode(address: str, api_key: str) -> tuple[float, float]:
-    """Resolve *address* to ``(lat, lon)`` in WGS-84 via AMap.
+@dataclass(frozen=True)
+class GeocodeResult:
+    """A geocoded address and the administrative fields returned by AMap."""
 
-    AMap returns GCJ-02 coordinates; this function applies the
-    standard conversion so that downstream weather APIs receive
-    accurate WGS-84 positions.
+    latitude: float
+    longitude: float
+    province: str
+    city: str
+    district: str
+
+
+def _text_field(value: object) -> str:
+    """Normalize AMap fields that may be strings or one-item lists."""
+    if isinstance(value, list):
+        for item in value:
+            if item:
+                return str(item)
+        return ""
+    return str(value or "")
+
+
+async def amap_geocode_detail(address: str, api_key: str) -> GeocodeResult:
+    """Resolve *address* and return WGS-84 coordinates plus region metadata.
+
+    AMap returns GCJ-02 coordinates; this function applies the standard
+    conversion so that downstream weather APIs receive accurate WGS-84
+    positions.
 
     Raises ``ValueError`` on failure.
     """
@@ -110,4 +132,17 @@ async def amap_geocode(address: str, api_key: str) -> tuple[float, float]:
     gcj_lng, gcj_lat = (float(x) for x in location.split(","))
 
     wgs_lng, wgs_lat = gcj02_to_wgs84(gcj_lng, gcj_lat)
-    return wgs_lat, wgs_lng
+    geocode = res["geocodes"][0]
+    return GeocodeResult(
+        latitude=wgs_lat,
+        longitude=wgs_lng,
+        province=_text_field(geocode.get("province")),
+        city=_text_field(geocode.get("city")),
+        district=_text_field(geocode.get("district")),
+    )
+
+
+async def amap_geocode(address: str, api_key: str) -> tuple[float, float]:
+    """Resolve *address* to ``(lat, lon)`` in WGS-84 via AMap."""
+    result = await amap_geocode_detail(address, api_key)
+    return result.latitude, result.longitude

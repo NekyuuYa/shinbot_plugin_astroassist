@@ -70,6 +70,7 @@ _HELP_TEXT = (
     "!雷达 → 获取最新全国雷达回波拼图\n"
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
     "!雷达 北京 → 单站雷达 (省份或城市名)\n"
+    "!雷达 无锡 → 无对应站点时自动选择临近站点\n"
     "!雷达动图 → 全国雷达回波动画 (~2小时)\n\n"
     "🌊 4. 海区云图\n"
     "!海区云图 → 获取最新海区红外云图\n"
@@ -271,7 +272,12 @@ def register_commands(
         usage="!雷达 [区域或城市名]",
     )
     async def handle_radar(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
-        await _handle_radar_static(ctx, raw_args.strip(), plg)
+        await _handle_radar_static(
+            ctx,
+            raw_args.strip(),
+            plg,
+            amap_key=getattr(config, "amap_key", ""),
+        )
         ctx.stop()
 
     # ---- 雷达动图 ----
@@ -282,7 +288,12 @@ def register_commands(
         usage="!雷达动图 [区域或城市名]",
     )
     async def handle_radar_gif(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
-        await _handle_radar_gif(ctx, raw_args.strip(), plg)
+        await _handle_radar_gif(
+            ctx,
+            raw_args.strip(),
+            plg,
+            amap_key=getattr(config, "amap_key", ""),
+        )
         ctx.stop()
 
     # ---- 海区云图 ----
@@ -379,11 +390,18 @@ def register_commands(
 
 
 async def _handle_radar_static(
-    ctx: MessageContext, query: str, plg: Any,
+    ctx: MessageContext,
+    query: str,
+    plg: Any,
+    *,
+    amap_key: str = "",
 ) -> None:
     """Send the latest single radar frame as PNG."""
     try:
-        url, obs_time, label = await fetch_radar(query)
+        if amap_key:
+            url, obs_time, label = await fetch_radar(query, amap_key=amap_key)
+        else:
+            url, obs_time, label = await fetch_radar(query)
     except Exception as exc:
         _LOG.exception("AstroAssist radar fetch error")
         await ctx.send(f"❌ 雷达数据获取失败: {exc}")
@@ -406,11 +424,21 @@ async def _handle_radar_static(
 
 
 async def _handle_radar_gif(
-    ctx: MessageContext, query: str, plg: Any,
+    ctx: MessageContext,
+    query: str,
+    plg: Any,
+    *,
+    amap_key: str = "",
 ) -> None:
     """Send an animated radar echo GIF (~2 h history)."""
     try:
-        gif_bytes, newest, oldest, label = await fetch_radar_gif(query)
+        if amap_key:
+            gif_bytes, newest, oldest, label = await fetch_radar_gif(
+                query,
+                amap_key=amap_key,
+            )
+        else:
+            gif_bytes, newest, oldest, label = await fetch_radar_gif(query)
     except Exception as exc:
         _LOG.exception("AstroAssist radar GIF error")
         await ctx.send(f"❌ 雷达动图生成失败: {exc}")
