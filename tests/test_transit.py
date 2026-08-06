@@ -376,7 +376,7 @@ def test_fetch_transit_report_builds_blocks_and_warnings(
     async def run() -> None:
         nonlocal report
         report = await fetch_transit_report(
-            *_BEIJING, "北京", query="国际空间站", days=2
+            *_BEIJING, "北京", query="国际空间站", days=2, night_only=False
         )
 
     asyncio.run(run())
@@ -386,6 +386,28 @@ def test_fetch_transit_report_builds_blocks_and_warnings(
     assert any("国际空间站" in block for block in report.blocks)
     assert "亮度" in report.blocks[0]  # ISS has a known standard magnitude
     assert "过境卫星预报" in report.to_text()
+
+
+def test_fetch_transit_report_defaults_to_night_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shinbot_plugin_astroassist.transit as transit
+
+    monkeypatch.setattr(transit, "_utcnow", lambda: _WINDOW_START)
+
+    async def fake_fetch_tle(norad_id: int) -> tuple[str, str]:
+        return _ISS_LINE1, _ISS_LINE2
+
+    monkeypatch.setattr(transit, "fetch_tle", fake_fetch_tle)
+
+    import asyncio
+
+    # All ISS passes over Beijing in this window occur in daylight, so the
+    # night-only default filters every one of them out.
+    report = asyncio.run(
+        fetch_transit_report(*_BEIJING, "北京", query="国际空间站", days=2)
+    )
+    assert "（无符合条件的过境）" in report.blocks[0]
 
 
 def test_fetch_transit_report_reports_missing_tle_warning(
@@ -405,7 +427,9 @@ def test_fetch_transit_report_reports_missing_tle_warning(
     import asyncio
 
     report = asyncio.run(
-        fetch_transit_report(*_BEIJING, "北京", query="国际空间站 天宫", days=1)
+        fetch_transit_report(
+            *_BEIJING, "北京", query="国际空间站 天宫", days=1, night_only=False
+        )
     )
     assert any("国际空间站" in block for block in report.blocks)
     assert "⚠️ 天宫空间站" in report.to_text()
@@ -463,16 +487,16 @@ async def test_transit_command_uses_stored_location(
     )
 
     ctx = _Ctx()
-    await plugin.commands["过境卫星"]["handler"](ctx, "天宫 -d 2 -n")
+    await plugin.commands["过境卫星"]["handler"](ctx, "天宫 -d 2")
 
     assert ctx.stopped is True
     assert captured["lat"] == 31.2304
     assert captured["lon"] == 121.4737
     assert captured["name"] == "上海"
+    # Night-only is the default; the handler passes no night_only override.
     assert captured["kwargs"] == {
         "query": "天宫",
         "days": 2,
-        "night_only": True,
     }
     assert "上海" in ctx.sent[0]
 

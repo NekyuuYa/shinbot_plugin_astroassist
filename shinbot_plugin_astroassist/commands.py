@@ -91,12 +91,11 @@ _HELP_TEXT = (
     "!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR] → 查询 Dapiya 台风云图动画\n"
     "  (数据源：中央气象台 NMC 台风快讯/路径图，Dapiya 台风云图)\n\n"
     "🛰️ 6. 卫星过境预报\n"
-    "!过境卫星 → 默认位置未来3天 国际空间站/天宫空间站 过境时刻\n"
+    "!过境卫星 → 默认位置未来3天 国际空间站/天宫空间站 夜间过境时刻\n"
     "!过境卫星 [卫星名] → 国际空间站/天宫空间站/哈勃，或直接输入 NORAD 编号\n"
     "!过境卫星 -d [天数] → 指定预报长度(1-7天)\n"
-    "!过境卫星 -n → 仅夜间(太阳在地平线下)过境\n"
     "!过境卫星 [地名] → 临时查询某地\n"
-    "  (数据源：CelesTrak TLE + SGP4 本地轨道推算)\n\n"
+    "  (默认仅显示夜间、太阳在地平线下的过境；数据源：CelesTrak TLE + SGP4 本地轨道推算)\n\n"
     "📊 7. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
@@ -156,11 +155,10 @@ def _parse_light_pollution_args(raw: str) -> tuple[str | None, int | None]:
     return place, year
 
 
-def _parse_transit_args(raw: str) -> tuple[int, bool, str]:
-    """Parse ``-d <days>`` ``-n`` anywhere and return the remaining text."""
+def _parse_transit_args(raw: str) -> tuple[int, str]:
+    """Parse ``-d <days>`` anywhere and return the remaining text."""
     args = raw.strip().split()
     days = 3
-    night_only = False
     rest: list[str] = []
     i = 0
     while i < len(args):
@@ -171,13 +169,9 @@ def _parse_transit_args(raw: str) -> tuple[int, bool, str]:
                 pass
             i += 2
             continue
-        if args[i] == "-n":
-            night_only = True
-            i += 1
-            continue
         rest.append(args[i])
         i += 1
-    return days, night_only, " ".join(rest)
+    return days, " ".join(rest)
 
 
 async def _resolve_observation_location(
@@ -531,17 +525,16 @@ def register_commands(
         if args.split()[:1] in (["help"], ["帮助"], ["-h"]):
             await ctx.send(
                 "🛰️ 过境卫星预报 | 说明\n"
-                "!过境卫星 → 默认观测位置，未来3天国际空间站/天宫空间站过境\n"
+                "!过境卫星 → 默认观测位置，未来3天国际空间站/天宫空间站过境（默认仅夜间）\n"
                 "!过境卫星 [卫星名] → 国际空间站(ISS)/天宫空间站(CSS)/哈勃(HST)，或直接输入 NORAD 编号\n"
                 "!过境卫星 -d [天数] → 预报长度 1-7 天\n"
-                "!过境卫星 -n → 仅夜间（太阳在地平线下）过境\n"
                 "!过境卫星 [地名] → 临时查询某地\n"
                 "  (数据源：CelesTrak TLE + SGP4 本地轨道推算)"
             )
             ctx.stop()
             return
 
-        days, night_only, rest = _parse_transit_args(args)
+        days, rest = _parse_transit_args(args)
         _satellites, place = split_satellite_query(rest)
         location = await _resolve_observation_location(
             ctx, config, store, place or None
@@ -557,7 +550,6 @@ def register_commands(
                 location.name,
                 query=rest,
                 days=days,
-                night_only=night_only,
             )
         except Exception as exc:
             _LOG.exception("AstroAssist satellite transit error")

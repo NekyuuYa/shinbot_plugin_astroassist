@@ -154,14 +154,25 @@ def _parse_tle(text: str) -> tuple[str, str] | None:
 
 
 async def fetch_tle(norad_id: int) -> tuple[str, str] | None:
-    """Fetch ``(line1, line2)`` TLE for *norad_id* from CelesTrak."""
-    params = {"CATNR": str(norad_id), "FORMAT": "tle"}
-    async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT, follow_redirects=True
-    ) as client:
-        res = await client.get(_TLE_URL, params=params)
-        res.raise_for_status()
-    return _parse_tle(res.text)
+    """Fetch ``(line1, line2)`` TLE for *norad_id* from CelesTrak.
+
+    Retries once after a short pause to ride out transient network blips.
+    """
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            params = {"CATNR": str(norad_id), "FORMAT": "tle"}
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, follow_redirects=True
+            ) as client:
+                res = await client.get(_TLE_URL, params=params)
+                res.raise_for_status()
+            return _parse_tle(res.text)
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+    raise last_error or RuntimeError(f"TLE 获取失败 (NORAD {norad_id})")
 
 
 def build_satrec(line1: str, line2: str) -> Satrec | None:
@@ -666,10 +677,14 @@ async def fetch_transit_report(
     *,
     query: str = "",
     days: int = 3,
-    night_only: bool = False,
+    night_only: bool = True,
     min_elevation: float = _MIN_ELEVATION,
 ) -> TransitReport:
-    """Fetch TLEs and compute a satellite pass report for *(lat, lon)*."""
+    """Fetch TLEs and compute a satellite pass report for *(lat, lon)*.
+
+    By default only night-time passes (sun below the horizon) are included —
+    satellites are not visible in daylight.
+    """
     if not _SGP4_AVAILABLE:
         raise RuntimeError("缺少 sgp4 依赖，无法进行轨道推算。请安装 sgp4。")
     _validate_coordinates(lat, lon)
@@ -713,7 +728,8 @@ async def fetch_transit_report(
         blocks.append(_format_satellite_block(spec, passes, _local_tz()))
 
     if not blocks:
-        raise ValueError("所有卫星均无法获取轨道数据")
+        detail = "；".join(warnings) if warnings else "未知原因"
+        raise ValueError(f"所有卫星均无法获取轨道数据（{detail}）")
 
     return build_transit_report(
         location_name,
