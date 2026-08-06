@@ -86,7 +86,7 @@
     <div class="card">
         <div class="header">
             <h1>🔭 {{ location_name }}气象预报</h1>
-            <div class="meta">📍 {{ lat }}, {{ lon }} | {{ model_name }}</div>
+            <div class="meta">📍 {{ lat }}, {{ lon }} | {{ model_name }}{% if light_pollution_text %} | 🌌 {{ light_pollution_text }}{% endif %}</div>
         </div>
         <table>
             <thead>

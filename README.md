@@ -14,6 +14,7 @@
 - **雷达临近站点**：输入没有独立雷达站的城市时，读取 NMC 省级站点导航，并通过高德地理编码按距离推荐或选择临近站点。
 - **海区云图**：获取中央气象台 NMC 海区红外云图，并作为台风信息补充图。
 - **台风快讯**：获取中央气象台 NMC 最新台风快讯摘要、详情、路径预报图与 Dapiya 台风云图。
+- **光污染报告**：调用 DarkMap 接口生成 Bortle 等级、SQM 天光亮度、极限星等与银河可见性报告。
 
 ## 🚀 安装
 
@@ -54,6 +55,7 @@
 | `!台风云图 09W RGB` | | 指定云图类型 (VIS/RGB/TRUECOLOR) |
 | `!台风云图动图 BAVI TRUECOLOR` | `!typhooncloudgif` | Dapiya 台风云图动画 |
 | `!台风 help` | | 显示台风查询帮助 |
+| `!光污染` | `!lightpollution` `!bortle` `!光害` | 生成当前位置光污染 (Bortle) 报告，含 SQM/极限星等/银河可见性 |
 | `!晴天钟 help` | | 显示帮助信息 |
 
 ## 📊 视觉说明
@@ -64,4 +66,4 @@
 
 ## 🛠️ 开源协议
 
-MIT License。数据源由 [Open-Meteo](https://open-meteo.com/)、[7Timer!](http://www.7timer.info/) 和 [中央气象台 NMC](http://www.nmc.cn/) 提供。
+MIT License。数据源由 [Open-Meteo](https://open-meteo.com/)、[7Timer!](http://www.7timer.info/)、[中央气象台 NMC](http://www.nmc.cn/) 和 [DarkMap](https://www.darkmap.cn/) 提供。

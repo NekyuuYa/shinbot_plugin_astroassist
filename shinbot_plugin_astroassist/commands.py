@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -20,6 +21,11 @@ from .dapiya_floater import (
 )
 from .forecast import fetch_forecast
 from .geo import amap_geocode
+from .lightpollution import (
+    LightPollution,
+    fetch_light_pollution,
+    format_light_pollution_report,
+)
 from .models import LocationData
 from .radar import download_radar_image, fetch_radar, fetch_radar_gif
 from .satellite import (
@@ -65,7 +71,8 @@ _HELP_TEXT = (
     "!晴天钟 → 查看默认位置3天预报\n"
     "!晴天钟 [地名] → 临时查询某地天气\n"
     "!晴天钟 -d [天数] → 指定预报长度(1-7天)\n"
-    "!晴天钟 -n → 过滤夜间窗口(18点至06点)\n\n"
+    "!晴天钟 -n → 过滤夜间窗口(18点至06点)\n"
+    "!光污染 [地名] → 当前位置光污染 (Bortle) 报告\n\n"
     "📡 3. 雷达回波\n"
     "!雷达 → 获取最新全国雷达回波拼图\n"
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
@@ -85,6 +92,7 @@ _HELP_TEXT = (
     "📊 6. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
+    "• 光污染 (Bortle 1-9): 级别越低天空越暗，观星条件越好 (DarkMap)\n"
     "• 露点风险: 红色代表极易结露，需保护器材\n"
     "• 云量方块: 内部白色填充代表天空遮挡度\n\n"
     "💡 示例：!晴天钟 -d 1 -n 西藏阿里\n"
@@ -126,6 +134,34 @@ def _parse_astro_args(raw: str) -> tuple[int, bool, str | None]:
     return days, night_only, place
 
 
+async def _resolve_observation_location(
+    ctx: MessageContext,
+    config: Any,
+    store: LocationStore,
+    target_place: str | None,
+) -> LocationData | None:
+    """Resolve a stored or temporary observation location.
+
+    Returns ``None`` after sending an error message to *ctx* when the
+    location cannot be resolved.
+    """
+    if target_place:
+        if not config.amap_key:
+            await ctx.send("❌ 未配置 amap_key，无法解析地名。")
+            return None
+        try:
+            lat, lon = await amap_geocode(target_place, config.amap_key)
+            return LocationData(lat=lat, lon=lon, name=target_place)
+        except ValueError as exc:
+            await ctx.send(f"❌ 临时解析失败: {exc}")
+            return None
+    location = await store.get(ctx.session_id)
+    if not location:
+        await ctx.send("❌ 请先用 `!设置位置 [地名]` 设置默认观测位置。")
+        return None
+    return location
+
+
 # ------------------------------------------------------------------
 # Handler registration
 # ------------------------------------------------------------------
@@ -160,25 +196,10 @@ def register_commands(
         days, night_only, target_place = _parse_astro_args(raw_args)
 
         # Resolve location
-        location: LocationData | None = None
-        if target_place:
-            if not config.amap_key:
-                await ctx.send("❌ 未配置 amap_key，无法解析地名。")
-                ctx.stop()
-                return
-            try:
-                lat, lon = await amap_geocode(target_place, config.amap_key)
-                location = LocationData(lat=lat, lon=lon, name=target_place)
-            except ValueError as exc:
-                await ctx.send(f"❌ 临时解析失败: {exc}")
-                ctx.stop()
-                return
-        else:
-            location = await store.get(ctx.session_id)
-            if not location:
-                await ctx.send("❌ 请先用 `!设置位置 [地名]` 设置默认观测位置。")
-                ctx.stop()
-                return
+        location = await _resolve_observation_location(ctx, config, store, target_place)
+        if location is None:
+            ctx.stop()
+            return
 
         # Check RenderKit
         if not _RENDERKIT_AVAILABLE:
@@ -187,16 +208,31 @@ def register_commands(
             return
 
         # Fetch & process
+        light_task = asyncio.create_task(
+            fetch_light_pollution(location.lat, location.lon)
+        )
         try:
             render_data = await fetch_forecast(
                 location.lat, location.lon, days=days, night_only=night_only
             )
             render_data.location_name = location.name
         except Exception as exc:
+            light_task.cancel()
             _LOG.exception("AstroAssist forecast error")
             await ctx.send(f"❌ 预报获取异常: {exc}")
             ctx.stop()
             return
+
+        light_pollution: LightPollution | None = None
+        try:
+            light_pollution = await light_task
+        except Exception:
+            _LOG.info("AstroAssist light pollution unavailable", exc_info=True)
+        light_pollution_text = (
+            f"{light_pollution.bortle_text} · {light_pollution.mpsas:.2f} mag/arcsec²"
+            if light_pollution is not None
+            else None
+        )
 
         # Render to PNG
         try:
@@ -210,6 +246,7 @@ def register_commands(
                     "rows": render_data.rows,
                     "theme_mode": render_data.theme_mode,
                     "model_name": render_data.model_name,
+                    "light_pollution_text": light_pollution_text,
                 },
                 output_dir=plg.data_dir,
                 options=RenderOptions(
@@ -225,6 +262,49 @@ def register_commands(
             _LOG.exception("AstroAssist render error")
             await ctx.send(f"❌ 渲染异常: {exc}")
 
+        ctx.stop()
+
+    # ---- 光污染 ----
+    @plg.on_command(
+        "光污染",
+        aliases=["lightpollution", "bortle", "光害"],
+        description="生成当前位置的光污染 (Bortle) 报告",
+        usage="!光污染 [地名]",
+    )
+    async def handle_light_pollution(ctx: MessageContext, raw_args: str) -> None:
+        args = raw_args.strip()
+        if args.split()[:1] in (["help"], ["帮助"], ["-h"]):
+            await ctx.send(
+                "🌌 光污染报告 | 说明\n"
+                "!光污染 → 默认观测位置\n"
+                "!光污染 [地名] → 临时查询某地 (需配置 amap_key)"
+            )
+            ctx.stop()
+            return
+
+        location = await _resolve_observation_location(
+            ctx, config, store, args or None
+        )
+        if location is None:
+            ctx.stop()
+            return
+
+        try:
+            light_pollution = await fetch_light_pollution(location.lat, location.lon)
+        except Exception as exc:
+            _LOG.exception("AstroAssist light pollution query error")
+            await ctx.send(f"❌ 光污染数据获取失败: {exc}")
+            ctx.stop()
+            return
+
+        await ctx.send(
+            format_light_pollution_report(
+                location.name,
+                location.lat,
+                location.lon,
+                light_pollution,
+            )
+        )
         ctx.stop()
 
     # ---- 设置位置 ----
