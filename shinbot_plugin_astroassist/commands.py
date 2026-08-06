@@ -72,7 +72,7 @@ _HELP_TEXT = (
     "!晴天钟 [地名] → 临时查询某地天气\n"
     "!晴天钟 -d [天数] → 指定预报长度(1-7天)\n"
     "!晴天钟 -n → 过滤夜间窗口(18点至06点)\n"
-    "!光污染 [地名] → 当前位置光污染 (Bortle) 报告\n\n"
+    "!光污染 [地名] [年份] → 当前位置光污染 (Bortle) 报告，年份 2012-2025\n\n"
     "📡 3. 雷达回波\n"
     "!雷达 → 获取最新全国雷达回波拼图\n"
     "!雷达 华北 → 区域拼图 (华北/华东/华南/...)\n"
@@ -132,6 +132,20 @@ def _parse_astro_args(raw: str) -> tuple[int, bool, str | None]:
         break
     place = " ".join(place_parts) if place_parts else None
     return days, night_only, place
+
+
+def _parse_light_pollution_args(raw: str) -> tuple[str | None, int | None]:
+    """Split ``[地名] [年份]`` for the light pollution command."""
+    tokens = raw.strip().split()
+    year = None
+    place_tokens: list[str] = []
+    for token in tokens:
+        if token.isdigit() and len(token) == 4:
+            year = int(token)
+        else:
+            place_tokens.append(token)
+    place = " ".join(place_tokens) if place_tokens else None
+    return place, year
 
 
 async def _resolve_observation_location(
@@ -269,28 +283,32 @@ def register_commands(
         "光污染",
         aliases=["lightpollution", "bortle", "光害"],
         description="生成当前位置的光污染 (Bortle) 报告",
-        usage="!光污染 [地名]",
+        usage="!光污染 [地名] [年份]",
     )
     async def handle_light_pollution(ctx: MessageContext, raw_args: str) -> None:
         args = raw_args.strip()
         if args.split()[:1] in (["help"], ["帮助"], ["-h"]):
             await ctx.send(
                 "🌌 光污染报告 | 说明\n"
-                "!光污染 → 默认观测位置\n"
-                "!光污染 [地名] → 临时查询某地 (需配置 amap_key)"
+                "!光污染 → 默认观测位置 (最新数据)\n"
+                "!光污染 [地名] → 临时查询某地 (需配置 amap_key)\n"
+                "!光污染 [年份] → 指定数据年份 (2012-2025，逐年对比)"
             )
             ctx.stop()
             return
 
+        target_place, year = _parse_light_pollution_args(args)
         location = await _resolve_observation_location(
-            ctx, config, store, args or None
+            ctx, config, store, target_place
         )
         if location is None:
             ctx.stop()
             return
 
         try:
-            light_pollution = await fetch_light_pollution(location.lat, location.lon)
+            light_pollution = await fetch_light_pollution(
+                location.lat, location.lon, year=year
+            )
         except Exception as exc:
             _LOG.exception("AstroAssist light pollution query error")
             await ctx.send(f"❌ 光污染数据获取失败: {exc}")

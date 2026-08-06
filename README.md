@@ -55,7 +55,7 @@
 | `!台风云图 09W RGB` | | 指定云图类型 (VIS/RGB/TRUECOLOR) |
 | `!台风云图动图 BAVI TRUECOLOR` | `!typhooncloudgif` | Dapiya 台风云图动画 |
 | `!台风 help` | | 显示台风查询帮助 |
-| `!光污染` | `!lightpollution` `!bortle` `!光害` | 生成当前位置光污染 (Bortle) 报告，含 SQM/极限星等/银河可见性 |
+| `!光污染 [地名] [年份]` | `!lightpollution` `!bortle` `!光害` | 生成当前位置光污染 (Bortle) 报告，含 SQM/极限星等/银河可见性；年份 2012-2025 逐年对比 |
 | `!晴天钟 help` | | 显示帮助信息 |
 
 ## 📊 视觉说明

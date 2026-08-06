@@ -71,7 +71,7 @@ class _FakeResponse:
 class _FakeClient:
     def __init__(self, payload: dict[str, Any], **_: Any) -> None:
         self._payload = payload
-        self.requested: tuple[float, float] | None = None
+        self.requested: list[tuple[str, dict[str, Any]]] = []
 
     async def __aenter__(self) -> "_FakeClient":
         return self
@@ -80,8 +80,7 @@ class _FakeClient:
         return False
 
     async def get(self, url: str, *, params: dict[str, Any] | None = None) -> _FakeResponse:
-        assert url == lightpollution._URL
-        self.requested = (params["lat"], params["lon"])
+        self.requested.append((url, dict(params or {})))
         return _FakeResponse(self._payload)
 
 
@@ -131,7 +130,9 @@ async def test_fetch_light_pollution_parses_payload(
 
     result = await fetch_light_pollution(35.069, 116.959)
 
-    assert client.requested == (35.069, 116.959)
+    url, params = client.requested[0]
+    assert url == lightpollution._LATEST_URL
+    assert params == {"lat": 35.069, "lon": 116.959}
     assert result == LightPollution(
         mpsas=20.553,
         ratio=2.791,
@@ -181,6 +182,52 @@ async def test_fetch_light_pollution_rejects_implausible_brightness(
         await fetch_light_pollution(35.0, 116.0)
 
 
+@pytest.mark.asyncio
+async def test_fetch_light_pollution_with_year_uses_sky_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(
+        {
+            "year": 2015,
+            "query_point": {
+                "bundle": "global_current_baseline_2015",
+                "sqm": 21.063,
+                "lpi": 1.37,
+            },
+        }
+    )
+    monkeypatch.setattr(
+        lightpollution.httpx, "AsyncClient", lambda **kw: client, raising=False
+    )
+
+    result = await fetch_light_pollution(35.069, 116.959, year=2015)
+
+    url, params = client.requested[0]
+    assert url == lightpollution._SKY_PROFILE_URL
+    assert params == {"lat": 35.069, "lon": 116.959, "year": 2015}
+    assert result.mpsas == 21.063
+    assert result.ratio == 1.37
+    assert result.year == 2015
+    assert result.bortle == 4  # 21.063 < 21.30, falls in the 20.49+ band
+    assert result.data_version == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_light_pollution_clamps_year_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient({"year": 2025, "query_point": {"sqm": 20.5, "lpi": 3.0}})
+    monkeypatch.setattr(
+        lightpollution.httpx, "AsyncClient", lambda **kw: client, raising=False
+    )
+
+    await fetch_light_pollution(35.0, 116.0, year=2030)
+    assert client.requested[0][1]["year"] == 2025
+
+    await fetch_light_pollution(35.0, 116.0, year=2005)
+    assert client.requested[1][1]["year"] == 2012
+
+
 def test_format_light_pollution_report() -> None:
     lp = LightPollution(
         mpsas=20.553,
@@ -201,6 +248,21 @@ def test_format_light_pollution_report() -> None:
     assert "银河可见性" in text
     assert "观测建议" in text
     assert "数据源：DarkMap 2025.v1" in text
+
+
+def test_format_light_pollution_report_with_year() -> None:
+    lp = LightPollution(
+        mpsas=21.063,
+        ratio=1.37,
+        bortle=3,
+        label="乡村夜空",
+        year=2015,
+    )
+
+    text = format_light_pollution_report("济宁", 35.069, 116.959, lp)
+
+    assert "数据年份：2015" in text
+    assert "数据源" not in text
 
 
 def test_register_commands_declares_light_pollution_command(tmp_path: Path) -> None:
@@ -224,8 +286,11 @@ async def test_light_pollution_command_reports_stored_location(
         LocationData(lat=35.069, lon=116.959, name="济宁"),
     )
 
-    async def fake_fetch(lat: float, lon: float) -> LightPollution:
+    async def fake_fetch(
+        lat: float, lon: float, *, year: int | None = None
+    ) -> LightPollution:
         assert (lat, lon) == (35.069, 116.959)
+        assert year is None
         return LightPollution(
             mpsas=20.553,
             ratio=2.791,
@@ -256,8 +321,11 @@ async def test_light_pollution_command_uses_temporary_place(
         assert place == "西藏阿里"
         return (32.5, 80.1)
 
-    async def fake_fetch(lat: float, lon: float) -> LightPollution:
+    async def fake_fetch(
+        lat: float, lon: float, *, year: int | None = None
+    ) -> LightPollution:
         assert (lat, lon) == (32.5, 80.1)
+        assert year is None
         return LightPollution(
             mpsas=21.89,
             ratio=1.2,
@@ -276,6 +344,45 @@ async def test_light_pollution_command_uses_temporary_place(
     assert ctx.stopped
     assert "光污染报告 | 西藏阿里" in ctx.sent[-1]
     assert "Bortle 2 · 典型暗夜" in ctx.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_light_pollution_command_accepts_year_arg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    store = LocationStore(tmp_path)
+    await store.put(
+        "session-1",
+        LocationData(lat=35.069, lon=116.959, name="济宁"),
+    )
+    captured: list[int | None] = []
+
+    async def fake_fetch(lat: float, lon: float, *, year: int | None = None) -> LightPollution:
+        captured.append(year)
+        return LightPollution(
+            mpsas=21.063,
+            ratio=1.37,
+            bortle=3,
+            label="乡村夜空",
+            year=year,
+        )
+
+    monkeypatch.setattr(commands, "fetch_light_pollution", fake_fetch)
+    plugin = _register(tmp_path)
+    ctx = _Ctx()
+
+    await plugin.commands["光污染"]["handler"](ctx, "2015")
+
+    assert ctx.stopped
+    assert captured == [2015]
+    assert "数据年份：2015" in ctx.sent[-1]
+
+    second_ctx = _Ctx()
+    await plugin.commands["光污染"]["handler"](second_ctx, "")
+    assert captured == [2015, None]
 
 
 @pytest.mark.asyncio
