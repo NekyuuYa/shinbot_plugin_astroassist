@@ -1,4 +1,4 @@
-"""Command handlers for 晴天钟, 设置位置, 雷达, 海区云图 and 台风."""
+"""Command handlers for 晴天钟, 设置位置, 雷达, 海区云图, 台风 and 过境卫星."""
 
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from .satellite import (
     fetch_satellite_gif,
 )
 from .storage import LocationStore
+from .transit import fetch_transit_report, split_satellite_query
 from .typhoon import (
     NmcTyphoonNewsProvider,
     TyphoonDetail,
@@ -89,7 +90,14 @@ _HELP_TEXT = (
     "!台风云图 [名称或编号] [VIS|RGB|TRUECOLOR] → 查询 Dapiya 台风云图\n"
     "!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR] → 查询 Dapiya 台风云图动画\n"
     "  (数据源：中央气象台 NMC 台风快讯/路径图，Dapiya 台风云图)\n\n"
-    "📊 6. 核心指标说明\n"
+    "🛰️ 6. 卫星过境预报\n"
+    "!过境卫星 → 默认位置未来3天 国际空间站/天宫空间站 过境时刻\n"
+    "!过境卫星 [卫星名] → 国际空间站/天宫空间站/哈勃，或直接输入 NORAD 编号\n"
+    "!过境卫星 -d [天数] → 指定预报长度(1-7天)\n"
+    "!过境卫星 -n → 仅夜间(太阳在地平线下)过境\n"
+    "!过境卫星 [地名] → 临时查询某地\n"
+    "  (数据源：CelesTrak TLE + SGP4 本地轨道推算)\n\n"
+    "📊 7. 核心指标说明\n"
     "• 视宁度 (Seeing): 大气抖动，越小越稳\n"
     "• 透明度 (Transparency): 大气透亮感\n"
     "• 光污染 (Bortle 1-9): 级别越低天空越暗，观星条件越好 (DarkMap)\n"
@@ -146,6 +154,30 @@ def _parse_light_pollution_args(raw: str) -> tuple[str | None, int | None]:
             place_tokens.append(token)
     place = " ".join(place_tokens) if place_tokens else None
     return place, year
+
+
+def _parse_transit_args(raw: str) -> tuple[int, bool, str]:
+    """Parse ``-d <days>`` ``-n`` anywhere and return the remaining text."""
+    args = raw.strip().split()
+    days = 3
+    night_only = False
+    rest: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "-d" and i + 1 < len(args):
+            try:
+                days = max(1, min(7, int(args[i + 1])))
+            except ValueError:
+                pass
+            i += 2
+            continue
+        if args[i] == "-n":
+            night_only = True
+            i += 1
+            continue
+        rest.append(args[i])
+        i += 1
+    return days, night_only, " ".join(rest)
 
 
 async def _resolve_observation_location(
@@ -484,6 +516,56 @@ def register_commands(
             message = f"❌ 台风数据查询失败: {exc}"
             await ctx.send(message)
 
+        ctx.stop()
+
+    # ---- 过境卫星 ----
+    @plg.on_command(
+        "过境卫星",
+        aliases=["卫星过境", "transit", "satpass"],
+        description="预报国际空间站等亮卫星的过境时刻",
+        usage="!过境卫星 [卫星名] [-d 天数] [-n] [地名]",
+    )
+    async def handle_transit(ctx: MessageContext, raw_args: str) -> None:  # noqa: UP037
+        args = raw_args.strip()
+
+        if args.split()[:1] in (["help"], ["帮助"], ["-h"]):
+            await ctx.send(
+                "🛰️ 过境卫星预报 | 说明\n"
+                "!过境卫星 → 默认观测位置，未来3天国际空间站/天宫空间站过境\n"
+                "!过境卫星 [卫星名] → 国际空间站(ISS)/天宫空间站(CSS)/哈勃(HST)，或直接输入 NORAD 编号\n"
+                "!过境卫星 -d [天数] → 预报长度 1-7 天\n"
+                "!过境卫星 -n → 仅夜间（太阳在地平线下）过境\n"
+                "!过境卫星 [地名] → 临时查询某地\n"
+                "  (数据源：CelesTrak TLE + SGP4 本地轨道推算)"
+            )
+            ctx.stop()
+            return
+
+        days, night_only, rest = _parse_transit_args(args)
+        _satellites, place = split_satellite_query(rest)
+        location = await _resolve_observation_location(
+            ctx, config, store, place or None
+        )
+        if location is None:
+            ctx.stop()
+            return
+
+        try:
+            report = await fetch_transit_report(
+                location.lat,
+                location.lon,
+                location.name,
+                query=rest,
+                days=days,
+                night_only=night_only,
+            )
+        except Exception as exc:
+            _LOG.exception("AstroAssist satellite transit error")
+            await ctx.send(f"❌ 过境预报获取失败: {exc}")
+            ctx.stop()
+            return
+
+        await ctx.send(report)
         ctx.stop()
 
 

@@ -15,6 +15,7 @@
 - **海区云图**：获取中央气象台 NMC 海区红外云图，并作为台风信息补充图。
 - **台风快讯**：获取中央气象台 NMC 最新台风快讯摘要、详情、路径预报图与 Dapiya 台风云图。
 - **光污染报告**：调用 DarkMap 接口生成 Bortle 等级、SQM 天光亮度、极限星等与银河可见性报告。
+- **卫星过境预报**：拉取 CelesTrak TLE 轨道数据，本地 SGP4 推算国际空间站/天宫空间站/哈勃的过境时刻、高度角与方位。
 
 ## 🚀 安装
 
@@ -56,6 +57,10 @@
 | `!台风云图动图 BAVI TRUECOLOR` | `!typhooncloudgif` | Dapiya 台风云图动画 |
 | `!台风 help` | | 显示台风查询帮助 |
 | `!光污染 [地名] [年份]` | `!lightpollution` `!bortle` `!光害` | 生成当前位置光污染 (Bortle) 报告，含 SQM/极限星等/银河可见性；年份 2012-2025 逐年对比 |
+| `!过境卫星` | `!卫星过境` `!transit` `!satpass` | 预报默认位置未来 3 天国际空间站/天宫空间站过境时刻 |
+| `!过境卫星 哈勃` | | 指定卫星（国际空间站/天宫空间站/哈勃，或 NORAD 编号） |
+| `!过境卫星 -d 5 -n` | | 指定天数 (1-7)，仅夜间过境 |
+| `!过境卫星 上海` | | 临时查询某地 |
 | `!晴天钟 help` | | 显示帮助信息 |
 
 ## 📊 视觉说明
@@ -66,4 +71,4 @@
 
 ## 🛠️ 开源协议
 
-MIT License。数据源由 [Open-Meteo](https://open-meteo.com/)、[7Timer!](http://www.7timer.info/)、[中央气象台 NMC](http://www.nmc.cn/) 和 [DarkMap](https://www.darkmap.cn/) 提供。
+MIT License。数据源由 [Open-Meteo](https://open-meteo.com/)、[7Timer!](http://www.7timer.info/)、[中央气象台 NMC](http://www.nmc.cn/)、[DarkMap](https://www.darkmap.cn/) 和 [CelesTrak](https://celestrak.org/) 提供。

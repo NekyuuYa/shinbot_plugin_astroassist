@@ -1,7 +1,7 @@
 [project]
 name = "shinbot-plugin-astroassist"
-version = "0.1.5"
-description = "晴天钟助手 — 天文气象看板，基于 Open-Meteo ECMWF + 7Timer! + NMC + Dapiya 数据。"
+version = "0.1.6"
+description = "晴天钟助手 — 天文气象看板，基于 Open-Meteo ECMWF + 7Timer! + NMC + Dapiya + CelesTrak 数据。"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -10,6 +10,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "playwright>=1.45.0",
     "pydantic>=2.0",
+    "sgp4>=2.20",
 ]
 
 [build-system]
