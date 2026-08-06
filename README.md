@@ -49,7 +49,7 @@
 | `!海区云图 西北太平洋` | | 西北太平洋海区红外云图 |
 | `!海区云图动图` | `!seacloudgif` | 海区红外云图动画 |
 | `!台风` | `!typhoon` | 查询中央气象台最新台风快讯 |
-| `!台风 <名称或编号>` | | 查询当前台风快讯详情并附带路径预报图、Dapiya 台风云图 |
+| `!台风 <名称或编号>` | | 查询任一活跃台风详情并附带路径预报图、Dapiya 台风云图 |
 | `!台风云图 巴威` | `!typhooncloud` | Dapiya 台风云图，默认 VIS |
 | `!台风云图 09W RGB` | | 指定云图类型 (VIS/RGB/TRUECOLOR) |
 | `!台风云图动图 BAVI TRUECOLOR` | `!typhooncloudgif` | Dapiya 台风云图动画 |

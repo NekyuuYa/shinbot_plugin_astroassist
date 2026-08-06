@@ -22,9 +22,11 @@ from shinbot_plugin_astroassist.typhoon import (
     format_typhoon_detail,
     format_typhoon_help,
     format_typhoon_list,
+    parse_nmc_typhoon_json_list,
     parse_nmc_typhoon_news_html,
     parse_nmc_typhoon_track_images_html,
     parse_nmc_typhoon_track_pages_html,
+    parse_nmc_typhoon_view_json,
     parse_typhoon_args,
 )
 
@@ -54,6 +56,11 @@ class _Ctx:
 
     def stop(self) -> None:
         self.stopped = True
+
+
+async def _no_json(url: str) -> str:
+    """Keep provider tests hermetic: the NMC JSON index is unavailable here."""
+    raise RuntimeError(f"NMC typhoon JSON API disabled in tests: {url}")
 
 
 _NMC_SAMPLE_HTML = """
@@ -158,6 +165,49 @@ _NMC_TRACK_REALISTIC_NAV_HTML = """
   </div>
 </div>
 """
+
+_NMC_BULLETIN_CHANHOM_HTML = """
+<div id=text>
+  <div class=title> 台风快讯 </div>
+  <div class=number> 2026年总964期 </div>
+  <div class=ctitle><span>中国气象局中央气象台</span><span>08月06日14时17分</span></div>
+  <table>
+    <tbody>
+      <tr><td>时&nbsp;&nbsp;&nbsp;&nbsp;间：</td><td> 06 日 14 时</td></tr>
+      <tr><td>命&nbsp;&nbsp;&nbsp;&nbsp;名：</td><td> “灿鸿”，CHAN-HOM</td></tr>
+      <tr><td>编&nbsp;&nbsp;&nbsp;&nbsp;号：</td><td> 2615 号</td></tr>
+      <tr><td>中心位置：</td><td><span> 北纬26.2度、东经163.6度</span></td></tr>
+      <tr><td>强度等级：</td><td><span> 热带风暴</span></td></tr>
+      <tr><td>最大风力：</td><td><span> 8级， 18米/秒（约65公里/小时）</span></td></tr>
+      <tr><td>中心气压：</td><td> 998 hPa</td></tr>
+      <tr><td>参考位置：</td><td> 距离日本东京东偏南方向约2500公里</td></tr>
+      <tr><td>预报结论：</td><td> “灿鸿”将以每小时25公里左右的速度向西北方向移动</td></tr>
+    </tbody>
+  </table>
+</div>
+"""
+
+_NMC_JSON_LIST_SAMPLE = (
+    'typhoon_jsons_list_default(({"typhoonList":['
+    "[3290453,\"CHAN-HOM\",\"灿鸿\",\"2615\",\"2615\",null,\"一种树\",\"start\"],"
+    "[3289093,\"KUJIRA\",\"鲸鱼\",\"2614\",\"2614\",20260016,\"鲸鱼星座\",\"start\"],"
+    "[3279904,\"DOLPHIN\",\"白海豚\",\"2613\",\"2613\",null,\"中华白海豚\",\"start\"],"
+    "[3257931,\"BAVI\",\"巴威\",\"2609\",\"2609\",null,\"越南北部的山脉\",\"stop\"]"
+    "]}))"
+)
+
+_NMC_JSON_VIEW_SAMPLE = (
+    'typhoon_jsons_view_3289093({"typhoon":['
+    '3289093,"KUJIRA","鲸鱼",2614,2614,20260016,"鲸鱼星座","start",['
+    '[3289098,"202608040900",1785834000000,"TD",119.1,17.8,1002,15,"0",0,[],null,'
+    '["202608041700","2026年08月04日17时00分",null,null]],'
+    '[3292330,"202608060000",1785974400000,"TD",120.9,17.7,1000,15,"ESE",16,'
+    '[["30KTS",450,380,200,200,3292330]],'
+    '{"BABJ":[[12,"202608060000",119.9,17.9,998,18,"BABJ","TS"],'
+    '[24,"202608060000",120.4,17.2,998,18,"BABJ","TS"]]},'
+    '["202608060800","2026年08月06日08时00分",null,null]]'
+    "]]})"
+)
 
 
 def _register(tmp_path: Path, *, typhoon_provider: Any | None = None) -> _FakePlugin:
@@ -336,6 +386,54 @@ def test_parse_nmc_typhoon_news_html_extracts_quick_bulletin() -> None:
     assert "下次更新时间" in detail.forecast_conclusion
 
 
+def test_parse_nmc_typhoon_json_list_extracts_active_storms() -> None:
+    summaries = parse_nmc_typhoon_json_list(_NMC_JSON_LIST_SAMPLE)
+
+    assert [item.identifier for item in summaries] == ["2615", "2614", "2613"]
+    assert [item.name for item in summaries] == ["灿鸿", "鲸鱼", "白海豚"]
+    assert [item.english_name for item in summaries] == ["CHAN-HOM", "KUJIRA", "DOLPHIN"]
+    assert [item.source_id for item in summaries] == ["3290453", "3289093", "3279904"]
+    assert all(item.status == "" for item in summaries)
+
+
+def test_parse_nmc_typhoon_json_list_skips_stopped_storms() -> None:
+    summaries = parse_nmc_typhoon_json_list(_NMC_JSON_LIST_SAMPLE)
+
+    assert all(item.identifier != "2609" for item in summaries)
+    assert all(item.name != "巴威" for item in summaries)
+
+
+def test_parse_nmc_typhoon_view_json_extracts_detail() -> None:
+    detail = parse_nmc_typhoon_view_json(_NMC_JSON_VIEW_SAMPLE)
+
+    assert detail.summary.identifier == "2614"
+    assert detail.summary.name == "鲸鱼"
+    assert detail.summary.english_name == "KUJIRA"
+    assert detail.summary.source_id == "3289093"
+    assert detail.summary.status == "热带低压"
+    assert detail.summary.center_lat == 17.7
+    assert detail.summary.center_lon == 120.9
+    assert detail.summary.wind_speed == 15
+    assert detail.summary.pressure == 1000
+    assert detail.summary.updated_at == "2026年08月06日08时00分"
+    assert detail.source == "中央气象台台风网"
+    assert detail.observation_time == "08/06 00:00"
+
+    assert len(detail.track) == 2
+    assert detail.track[0].time == "08/04 09:00"
+    assert detail.track[1].time == "08/06 00:00"
+    assert detail.track[1].level == "热带低压"
+    assert detail.track[1].movement == "东南东 16公里/小时"
+    assert detail.track[1].pressure == 1000
+    assert "七级风圈半径 东北方向450公里" in detail.wind_circle
+    assert "西北方向200公里" in detail.wind_circle
+
+    assert len(detail.forecast) == 2
+    assert detail.forecast[0].time == "08/06 12:00"
+    assert detail.forecast[0].level == "热带风暴"
+    assert detail.forecast[1].time == "08/07 00:00"
+
+
 def test_parse_nmc_typhoon_track_images_html_extracts_frames() -> None:
     frames = parse_nmc_typhoon_track_images_html(_NMC_TRACK_SAMPLE_HTML)
 
@@ -406,7 +504,7 @@ async def test_nmc_typhoon_provider_returns_latest_summary() -> None:
     async def fetch_html() -> str:
         return _NMC_SAMPLE_HTML
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html)
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=_no_json)
     result = await provider.list_active()
 
     assert isinstance(result, list)
@@ -419,7 +517,7 @@ async def test_nmc_typhoon_provider_matches_name_and_identifier() -> None:
     async def fetch_html() -> str:
         return _NMC_SAMPLE_HTML
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html)
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=_no_json)
 
     by_name = await provider.get_detail("巴威")
     by_identifier = await provider.get_detail("2609")
@@ -441,7 +539,11 @@ async def test_nmc_typhoon_provider_returns_matching_track_image() -> None:
             return _NMC_TRACK_BAVI_HTML
         return _NMC_TRACK_SAMPLE_HTML
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_track_html=fetch_track_html)
+    provider = NmcTyphoonNewsProvider(
+        fetch_html=fetch_html,
+        fetch_track_html=fetch_track_html,
+        fetch_json=_no_json,
+    )
 
     image = await provider.get_track_image("美莎克")
     bavi = await provider.get_track_image("巴威")
@@ -470,7 +572,11 @@ async def test_nmc_typhoon_provider_falls_back_to_probability_img1_seed() -> Non
             return _NMC_TRACK_BAVI_HTML
         raise AssertionError(f"unexpected url: {url}")
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_track_html=fetch_track_html)
+    provider = NmcTyphoonNewsProvider(
+        fetch_html=fetch_html,
+        fetch_track_html=fetch_track_html,
+        fetch_json=_no_json,
+    )
 
     image = await provider.get_track_image("巴威")
 
@@ -496,7 +602,11 @@ async def test_nmc_typhoon_provider_finds_arbitrary_name_from_numbered_seed() ->
             return _NMC_TRACK_ARBITRARY_IMG3_HTML
         raise RuntimeError("seed unavailable")
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_track_html=fetch_track_html)
+    provider = NmcTyphoonNewsProvider(
+        fetch_html=fetch_html,
+        fetch_track_html=fetch_track_html,
+        fetch_json=_no_json,
+    )
 
     image = await provider.get_track_image("玲玲")
 
@@ -521,12 +631,91 @@ async def test_nmc_typhoon_provider_stops_after_valid_navigation_miss() -> None:
         requested_urls.append(url)
         return _NMC_TRACK_REALISTIC_NAV_HTML
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_track_html=fetch_track_html)
+    provider = NmcTyphoonNewsProvider(
+        fetch_html=fetch_html,
+        fetch_track_html=fetch_track_html,
+        fetch_json=_no_json,
+    )
 
     image = await provider.get_track_image("不存在")
 
     assert isinstance(image, TyphoonUnavailable)
     assert requested_urls == ["https://www.nmc.cn/publish/typhoon/probability-img2.html"]
+
+
+@pytest.mark.asyncio
+async def test_nmc_typhoon_provider_lists_all_active_storms() -> None:
+    async def fetch_html() -> str:
+        return _NMC_BULLETIN_CHANHOM_HTML
+
+    async def fetch_json(url: str) -> str:
+        return _NMC_JSON_LIST_SAMPLE
+
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=fetch_json)
+
+    result = await provider.list_active()
+
+    assert [item.name for item in result] == ["灿鸿", "鲸鱼", "白海豚"]
+    # the bulletin storm carries the bulletin's status and update time
+    assert result[0].status == "热带风暴"
+    assert result[0].updated_at == "08月06日14时17分"
+    assert result[0].center_lat == 26.2
+    # other active storms stay bare
+    assert result[1].status == ""
+    assert result[1].english_name == "KUJIRA"
+
+
+@pytest.mark.asyncio
+async def test_nmc_typhoon_provider_detail_uses_bulletin_for_latest() -> None:
+    async def fetch_html() -> str:
+        return _NMC_BULLETIN_CHANHOM_HTML
+
+    async def fetch_json(url: str) -> str:
+        return _NMC_JSON_LIST_SAMPLE
+
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=fetch_json)
+
+    detail = await provider.get_detail("灿鸿")
+
+    assert isinstance(detail, TyphoonDetail)
+    assert detail.source == "中国气象局中央气象台"
+    assert detail.issue_number == "2026年总964期"
+    assert detail.summary.english_name == "CHAN-HOM"
+
+
+@pytest.mark.asyncio
+async def test_nmc_typhoon_provider_detail_for_non_latest_storm() -> None:
+    async def fetch_html() -> str:
+        return _NMC_BULLETIN_CHANHOM_HTML
+
+    requested: list[str] = []
+
+    async def fetch_json(url: str) -> str:
+        requested.append(url)
+        if "/view_" in url:
+            return _NMC_JSON_VIEW_SAMPLE
+        return _NMC_JSON_LIST_SAMPLE
+
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=fetch_json)
+
+    detail = await provider.get_detail("鲸鱼")
+
+    assert isinstance(detail, TyphoonDetail)
+    assert detail.summary.identifier == "2614"
+    assert detail.summary.english_name == "KUJIRA"
+    assert detail.source == "中央气象台台风网"
+    assert "view_3289093" in requested[-1]
+
+    # NMC 编号 2613 must resolve to 白海豚 (DOLPHIN/12W), never to 13W KUJIRA
+    by_number = await provider.get_detail("2613")
+    assert isinstance(by_number, TyphoonDetail)
+    assert "view_3279904" in requested[-1]
+
+    missing = await provider.get_detail("不存在")
+    assert isinstance(missing, TyphoonUnavailable)
+    assert "当前快讯" in missing.hint
+    assert "灿鸿" in missing.hint
+    assert "鲸鱼" in missing.hint
 
 
 def test_register_commands_declares_typhoon_command(tmp_path: Path) -> None:
@@ -606,11 +795,62 @@ async def test_typhoon_cloud_gif_command_accepts_rgb(
 
 
 @pytest.mark.asyncio
+async def test_typhoon_cloud_command_enriches_chinese_name_via_nmc_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    captured: list[str] = []
+
+    async def fake_fetch(query: str, *, product: str = "VIS") -> DapiyaFloaterFrame:
+        captured.append(query)
+        if "KUJIRA" not in query:
+            raise DapiyaFloaterError("miss")
+        return DapiyaFloaterFrame(
+            storm_id="13W",
+            name="KUJIRA",
+            product=product,
+            url="https://data.dapiya.cn/history/13W/VIS/latest.png",
+            time="2026-08-06 08:30:32",
+        )
+
+    async def fake_download(url: str, dest: Path) -> None:
+        dest.write_bytes(b"dapiya")
+
+    monkeypatch.setattr(commands, "fetch_dapiya_floater", fake_fetch)
+    monkeypatch.setattr(commands, "download_dapiya_floater_image", fake_download)
+
+    async def fetch_html() -> str:
+        return _NMC_BULLETIN_CHANHOM_HTML
+
+    async def fetch_json(url: str) -> str:
+        if "/view_" in url:
+            return _NMC_JSON_VIEW_SAMPLE
+        return _NMC_JSON_LIST_SAMPLE
+
+    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=fetch_json)
+    plugin = _register(tmp_path, typhoon_provider=provider)
+    ctx = _Ctx()
+
+    await plugin.commands["台风云图"]["handler"](ctx, "鲸鱼")
+
+    assert ctx.stopped
+    assert "13W KUJIRA台风云图 VIS" in ctx.sent[0]
+    # raw Chinese query first, then the English name resolved via NMC JSON
+    assert captured[0] == "鲸鱼"
+    assert any("KUJIRA" in attempt for attempt in captured)
+
+
+@pytest.mark.asyncio
 async def test_typhoon_command_default_provider_reports_nmc_summary(tmp_path: Path) -> None:
     async def fetch_html() -> str:
         return _NMC_SAMPLE_HTML
 
-    plugin = _register(tmp_path, typhoon_provider=NmcTyphoonNewsProvider(fetch_html=fetch_html))
+    plugin = _register(
+        tmp_path,
+        typhoon_provider=NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_json=_no_json),
+    )
     ctx = _Ctx()
 
     await plugin.commands["台风"]["handler"](ctx, "")
@@ -778,7 +1018,11 @@ async def test_typhoon_command_sends_track_image_when_bulletin_does_not_match(
             return _NMC_TRACK_BAVI_HTML
         return _NMC_TRACK_SAMPLE_HTML
 
-    provider = NmcTyphoonNewsProvider(fetch_html=fetch_html, fetch_track_html=fetch_track_html)
+    provider = NmcTyphoonNewsProvider(
+        fetch_html=fetch_html,
+        fetch_track_html=fetch_track_html,
+        fetch_json=_no_json,
+    )
     monkeypatch.setattr(commands, "download_typhoon_track_image", fake_download)
     plugin = _register(tmp_path, typhoon_provider=provider)
     ctx = _Ctx()

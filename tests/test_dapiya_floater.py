@@ -40,8 +40,6 @@ def test_parse_dapiya_active_storms() -> None:
         ("09W", "09W"),
         ("09W.BAVI", "09W"),
         ("BAVI", "09W"),
-        ("2609", "09W"),
-        ("2609 巴威", "09W"),
         ("97W", "97W"),
     ],
 )
@@ -49,6 +47,16 @@ def test_resolve_dapiya_storm(query: str, expected: str) -> None:
     storm = resolve_dapiya_storm(parse_dapiya_active_storms(_ACTIVE_SAMPLE), query)
 
     assert storm.storm_id == expected
+
+
+def test_resolve_dapiya_storm_does_not_guess_ids_from_nmc_numbers() -> None:
+    # NMC 编号 2609 must NOT fabricate "09W": NMC numbers and JTWC-style ids
+    # diverge (e.g. 2613 is DOLPHIN/12W while 2614 is KUJIRA/13W). 中文名 must
+    # also not match here — cross-source resolution happens via NMC enrichment.
+    with pytest.raises(DapiyaFloaterError, match="未匹配"):
+        resolve_dapiya_storm(parse_dapiya_active_storms(_ACTIVE_SAMPLE), "2609")
+    with pytest.raises(DapiyaFloaterError, match="未匹配"):
+        resolve_dapiya_storm(parse_dapiya_active_storms(_ACTIVE_SAMPLE), "巴威")
 
 
 def test_resolve_dapiya_storm_reports_miss() -> None:

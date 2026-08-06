@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
+import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urljoin
 
 import httpx
@@ -22,6 +25,43 @@ _NMC_TYPHOON_TRACK_SEED_URLS = tuple(
 )
 _NMC_BASE_URL = "https://www.nmc.cn"
 _NMC_NO_MATCH_MESSAGE = "NMC 当前台风快讯未匹配查询。"
+_NMC_TYPHOON_JSON_LIST_URL = (
+    "http://typhoon.nmc.cn/weatherservice/typhoon/jsons/list_default"
+)
+_NMC_TYPHOON_JSON_VIEW_URL = (
+    "http://typhoon.nmc.cn/weatherservice/typhoon/jsons/view_{id}"
+)
+_NMC_LEVEL_NAMES = {
+    "TD": "热带低压",
+    "TS": "热带风暴",
+    "STS": "强热带风暴",
+    "TY": "台风",
+    "STY": "强台风",
+    "SuperTY": "超强台风",
+}
+_NMC_DIRECTION_CN = {
+    "N": "北",
+    "NNE": "北北东",
+    "NE": "东北",
+    "ENE": "东北东",
+    "E": "东",
+    "ESE": "东南东",
+    "SE": "东南",
+    "SSE": "东南南",
+    "S": "南",
+    "SSW": "西南南",
+    "SW": "西南",
+    "WSW": "西南西",
+    "W": "西",
+    "WNW": "西北西",
+    "NW": "西北",
+    "NNW": "北北西",
+}
+_NMC_CIRCLE_NAMES = {
+    "30KTS": "七级风圈",
+    "50KTS": "十级风圈",
+    "64KTS": "十二级风圈",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -37,6 +77,7 @@ class TyphoonSummary:
     center_lon: float | None = None
     wind_speed: float | None = None
     pressure: int | None = None
+    source_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -145,6 +186,9 @@ class NmcTyphoonNewsProvider:
         track_urls: Sequence[str] | None = None,
         fetch_html: Callable[[], Awaitable[str]] | None = None,
         fetch_track_html: Callable[[str], Awaitable[str]] | None = None,
+        json_list_url: str = _NMC_TYPHOON_JSON_LIST_URL,
+        json_view_url: str = _NMC_TYPHOON_JSON_VIEW_URL,
+        fetch_json: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self._url = url
         self._track_url = track_url
@@ -156,28 +200,86 @@ class NmcTyphoonNewsProvider:
         self._track_urls = _dedupe_urls(seed_urls)
         self._fetch_html = fetch_html
         self._fetch_track_html = fetch_track_html
+        self._json_list_url = json_list_url
+        self._json_view_url = json_view_url
+        self._fetch_json = fetch_json
 
     async def list_active(self) -> TyphoonListResult:
-        """Return the latest NMC quick bulletin as the current typhoon item."""
-        detail = await self._fetch_detail()
-        if isinstance(detail, TyphoonUnavailable):
-            return detail
-        return [detail.summary]
+        """Return every active NMC typhoon, merging the latest bulletin's state."""
+        try:
+            summaries = await self._fetch_active_summaries()
+        except Exception:
+            summaries = []
+
+        if not summaries:
+            detail = await self._fetch_detail()
+            if isinstance(detail, TyphoonUnavailable):
+                return detail
+            return [detail.summary]
+
+        bulletin = await self._fetch_detail()
+        if not isinstance(bulletin, TyphoonDetail):
+            return summaries
+
+        bulletin_summary = bulletin.summary
+        merged: list[TyphoonSummary] = []
+        for summary in summaries:
+            if summary.identifier and summary.identifier == bulletin_summary.identifier:
+                merged.append(
+                    replace(
+                        summary,
+                        status=bulletin_summary.status,
+                        updated_at=bulletin_summary.updated_at,
+                        center_lat=bulletin_summary.center_lat,
+                        center_lon=bulletin_summary.center_lon,
+                        wind_speed=bulletin_summary.wind_speed,
+                        pressure=bulletin_summary.pressure,
+                    )
+                )
+            else:
+                merged.append(summary)
+        return merged
 
     async def get_detail(self, query: str) -> TyphoonDetailResult:
-        """Return latest bulletin detail when *query* matches its name or identifier."""
-        detail = await self._fetch_detail()
-        if isinstance(detail, TyphoonUnavailable):
-            return detail
+        """Return detail for *query* across every active NMC typhoon.
 
+        The latest quick bulletin is served as-is; other active typhoons are
+        resolved through the NMC typhoon JSON track service.
+        """
         query_text = query.strip()
-        if not query_text or _matches_summary(detail.summary, query_text):
-            return detail
+        bulletin_task = asyncio.create_task(self._fetch_detail())
+        try:
+            summaries = await self._fetch_active_summaries()
+        except Exception:
+            summaries = []
+        bulletin = await bulletin_task
 
-        return TyphoonUnavailable(
-            message=_NMC_NO_MATCH_MESSAGE,
-            hint=f"当前快讯：{_summary_label(detail.summary)}。使用 `!台风` 查看最新快讯。",
-        )
+        if not summaries:
+            summaries = [bulletin.summary] if isinstance(bulletin, TyphoonDetail) else []
+        if not query_text:
+            return bulletin
+
+        matched = next((s for s in summaries if _matches_summary(s, query_text)), None)
+        if matched is None:
+            labels = "、".join(_summary_label(s) for s in summaries) if summaries else "暂无"
+            return TyphoonUnavailable(
+                message=_NMC_NO_MATCH_MESSAGE,
+                hint=f"当前快讯：{labels}。使用 `!台风` 查看最新快讯。",
+            )
+        if (
+            isinstance(bulletin, TyphoonDetail)
+            and matched.identifier
+            and bulletin.summary.identifier == matched.identifier
+        ):
+            return bulletin
+
+        try:
+            return await self._fetch_view_detail(matched)
+        except Exception as exc:
+            return TyphoonUnavailable(
+                message="NMC 台风路径数据获取失败。",
+                hint=f"{exc}",
+            )
 
     async def get_track_image(self, query: str = "") -> TyphoonTrackImageResult:
         """Return latest NMC typhoon path forecast image when it matches *query*."""
@@ -225,6 +327,25 @@ class NmcTyphoonNewsProvider:
             res = await client.get(url, timeout=10.0, follow_redirects=True)
             res.raise_for_status()
             return res.text
+
+    async def _load_json(self, url: str) -> str:
+        if self._fetch_json is not None:
+            return await self._fetch_json(url)
+
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=10.0, follow_redirects=True)
+            res.raise_for_status()
+            return res.text
+
+    async def _fetch_active_summaries(self) -> list[TyphoonSummary]:
+        source = await self._load_json(self._json_list_url)
+        return parse_nmc_typhoon_json_list(source)
+
+    async def _fetch_view_detail(self, summary: TyphoonSummary) -> TyphoonDetail:
+        if not summary.source_id:
+            raise ValueError("缺少台风数据标识")
+        source = await self._load_json(self._json_view_url.format(id=summary.source_id))
+        return parse_nmc_typhoon_view_json(source)
 
     async def _track_source_for_query(self, query: str) -> str:
         query_text = query.strip()
@@ -312,8 +433,8 @@ def format_typhoon_help() -> str:
         "🌀 台风路径查询 | 指南\n"
         "━━━━━━━━━━━━━━━\n"
         "!台风 → 查询中央气象台最新台风快讯\n"
-        "!台风 list → 查询当前快讯摘要\n"
-        "!台风 <名称或编号> → 查询当前快讯详情，并附带路径图与最新海区云图\n"
+        "!台风 list → 列出当前活跃台风\n"
+        "!台风 <名称或编号> → 查询任一活跃台风详情，并附带路径图与最新海区云图\n"
         "!台风云图 [名称或编号] [VIS|RGB|TRUECOLOR] → Dapiya 云图，默认 VIS\n"
         "!台风云图动图 [名称或编号] [VIS|RGB|TRUECOLOR] → Dapiya 云图动画\n"
         "!typhoon <name-or-id> → 英文别名\n\n"
@@ -425,6 +546,219 @@ def parse_nmc_typhoon_news_html(source: str) -> TyphoonDetail:
         wind_circle=fields.get("风圈半径", ""),
         forecast_conclusion=fields.get("预报结论", ""),
     )
+
+
+def parse_nmc_typhoon_json_list(source: str) -> list[TyphoonSummary]:
+    """Parse the NMC typhoon index JSONP into active storm summaries."""
+    data = _parse_jsonp(source)
+    entries = data.get("typhoonList") or []
+    summaries: list[TyphoonSummary] = []
+    for entry in entries:
+        if not isinstance(entry, list) or len(entry) < 8:
+            continue
+        if str(entry[7] or "").strip() != "start":
+            continue
+        english = str(entry[1] or "").strip()
+        name = str(entry[2] or "").strip()
+        number = _number_text(entry[3])
+        if not name and not english:
+            continue
+        summaries.append(
+            TyphoonSummary(
+                identifier=number,
+                name=name,
+                english_name=english,
+                source_id=str(entry[0]),
+            )
+        )
+    return summaries
+
+
+def parse_nmc_typhoon_view_json(source: str) -> TyphoonDetail:
+    """Parse one NMC typhoon track JSONP response into a detail model."""
+    data = _parse_jsonp(source)
+    typhoon = data.get("typhoon")
+    if not isinstance(typhoon, list) or len(typhoon) < 9:
+        raise ValueError("页面中未找到有效台风路径数据")
+
+    points = typhoon[8] or []
+    track: list[TyphoonTrackPoint] = []
+    forecast: list[TyphoonTrackPoint] = []
+    level = ""
+    center_lat = center_lon = None
+    wind_speed: float | None = None
+    pressure: int | None = None
+    observation_time = ""
+    updated_at = ""
+    wind_circle = ""
+
+    for point in points:
+        parsed = _parse_view_point(point)
+        if parsed is None:
+            continue
+        track.append(parsed)
+        if point is points[-1]:
+            level = parsed.level
+            center_lat, center_lon = parsed.lat, parsed.lon
+            wind_speed, pressure = parsed.wind_speed, parsed.pressure
+            observation_time = parsed.time
+            updated_at = _view_point_bulletin_time(point) or parsed.time
+            wind_circle = _format_view_circles(_view_point_circles(point))
+            forecast = _parse_view_forecast(point)
+
+    summary = TyphoonSummary(
+        identifier=_number_text(typhoon[3]),
+        name=str(typhoon[2] or "").strip(),
+        english_name=str(typhoon[1] or "").strip(),
+        status=level,
+        updated_at=updated_at,
+        center_lat=center_lat,
+        center_lon=center_lon,
+        wind_speed=wind_speed,
+        pressure=pressure,
+        source_id=str(typhoon[0]),
+    )
+    return TyphoonDetail(
+        summary=summary,
+        source="中央气象台台风网",
+        observation_time=observation_time,
+        wind_circle=wind_circle,
+        track=track,
+        forecast=forecast,
+    )
+
+
+def _parse_jsonp(source: str) -> dict[str, Any]:
+    text = source.strip()
+    start = text.find("(")
+    end = text.rfind(")")
+    if start < 0 or end <= start:
+        raise ValueError("无效的 NMC 台风 JSON 响应")
+    payload_text = text[start + 1 : end].strip()
+    # Some NMC endpoints wrap the object in an extra pair of parentheses.
+    while payload_text.startswith("(") and payload_text.endswith(")"):
+        payload_text = payload_text[1:-1].strip()
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("无效的 NMC 台风 JSON 响应") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("无效的 NMC 台风 JSON 响应")
+    return payload
+
+
+def _number_text(value: Any) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _parse_view_point(point: Any) -> TyphoonTrackPoint | None:
+    if not isinstance(point, list) or len(point) < 10:
+        return None
+    stamp = str(point[1] or "")
+    if len(stamp) != 12 or not stamp.isdigit():
+        return None
+    try:
+        lon = float(point[4])
+        lat = float(point[5])
+    except (TypeError, ValueError):
+        return None
+    direction = str(point[8] or "")
+    speed = _number_or_none(point[9])
+    movement = ""
+    if direction and direction != "0":
+        movement = _NMC_DIRECTION_CN.get(direction, direction)
+        if speed is not None:
+            movement = f"{movement} {speed:g}公里/小时"
+    return TyphoonTrackPoint(
+        time=_format_view_stamp(stamp),
+        lat=lat,
+        lon=lon,
+        level=_NMC_LEVEL_NAMES.get(str(point[3] or ""), str(point[3] or "")),
+        wind_speed=_number_or_none(point[7]),
+        pressure=_int_or_none(point[6]),
+        movement=movement,
+    )
+
+
+def _parse_view_forecast(point: Any) -> list[TyphoonTrackPoint]:
+    forecasts = point[11] if len(point) > 11 and isinstance(point[11], dict) else {}
+    entries = forecasts.get("BABJ") or []
+    base_stamp = str(point[1] or "")
+    try:
+        base_time = datetime.strptime(base_stamp, "%Y%m%d%H%M")
+    except ValueError:
+        base_time = None
+
+    result: list[TyphoonTrackPoint] = []
+    for entry in entries:
+        if not isinstance(entry, list) or len(entry) < 8:
+            continue
+        hours = entry[0]
+        time_label = f"+{hours}h"
+        if base_time is not None and isinstance(hours, (int, float)):
+            time_label = (base_time + timedelta(hours=int(hours))).strftime("%m/%d %H:%M")
+        result.append(
+            TyphoonTrackPoint(
+                time=time_label,
+                lat=_number_or_none(entry[3]) or 0,
+                lon=_number_or_none(entry[2]) or 0,
+                level=_NMC_LEVEL_NAMES.get(str(entry[7] or ""), str(entry[7] or "")),
+                wind_speed=_number_or_none(entry[5]),
+                pressure=_int_or_none(entry[4]),
+            )
+        )
+    return result
+
+
+def _format_view_circles(circles: Any) -> str:
+    if not circles:
+        return ""
+    lines: list[str] = []
+    for circle in circles:
+        if not isinstance(circle, list) or len(circle) < 5:
+            continue
+        code = str(circle[0] or "")
+        label = _NMC_CIRCLE_NAMES.get(code, f"{code}风圈")
+        lines.append(
+            f"{label}半径 东北方向{circle[1]}公里；东南方向{circle[2]}公里；"
+            f"西南方向{circle[3]}公里；西北方向{circle[4]}公里"
+        )
+    return "\n".join(lines)
+
+
+def _view_point_circles(point: Any) -> list[Any]:
+    if len(point) > 10 and isinstance(point[10], list):
+        return point[10]
+    return []
+
+
+def _view_point_bulletin_time(point: Any) -> str:
+    if len(point) > 12 and isinstance(point[12], list) and len(point[12]) > 1:
+        value = point[12][1]
+        return str(value).strip() if value else ""
+    return ""
+
+
+def _format_view_stamp(stamp: str) -> str:
+    return f"{stamp[4:6]}/{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}"
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_nmc_typhoon_track_pages_html(

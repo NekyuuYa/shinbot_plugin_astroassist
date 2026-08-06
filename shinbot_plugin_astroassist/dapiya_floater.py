@@ -215,11 +215,16 @@ async def _download_frames(urls: list[str]) -> list[bytes]:
 
 
 def _storm_id_candidates(query: str) -> set[str]:
+    """Extract explicit storm ids such as ``12W``; NMC numbers are NOT ids.
+
+    NMC 编号 (e.g. ``2613``) never maps to a JTWC-style Dapiya id by a fixed
+    rule — 2613 is DOLPHIN/12W while 2614 is KUJIRA/13W — so fabricated
+    ``NNW`` guesses are deliberately not produced here. NMC numbers are
+    resolved to English names upstream (see commands enrichment).
+    """
     candidates: set[str] = set()
     for match in re.finditer(r"\b([0-9]{2})([A-Z])\b", query.upper()):
         candidates.add(match.group(1) + match.group(2))
-    for match in re.finditer(r"\b[0-9]{2}([0-9]{2})\s*号?\b", query):
-        candidates.add(match.group(1) + "W")
     return candidates
 
 
