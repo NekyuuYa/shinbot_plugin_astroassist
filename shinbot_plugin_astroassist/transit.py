@@ -385,8 +385,8 @@ class PassEvent:
     az_peak: float
     az_end: float
     night: bool
-    # Apparent visual magnitude at peak; None when the satellite has no
-    # known standard magnitude.
+    # Peak apparent visual magnitude over the pass (brightest moment); None
+    # when the satellite has no known standard magnitude.
     magnitude: float | None = None
 
     @property
@@ -459,7 +459,7 @@ def compute_passes(
             return
         # Peak via parabolic fit around the highest sample
         peak_i = max(range(len(samples)), key=lambda i: samples[i][1])
-        t_pk, e_pk, az_pk, r_pk = samples[peak_i]
+        t_pk, e_pk, az_pk, _r_pk = samples[peak_i]
         if 0 < peak_i < len(samples) - 1:
             offset, refined = _refine_peak(
                 samples[peak_i - 1][1], e_pk, samples[peak_i + 1][1]
@@ -483,8 +483,14 @@ def compute_passes(
             return
         magnitude: float | None = None
         if mag0 is not None:
-            sun_elev, sun_az = _sun_position(lat, lon, t_pk)
-            magnitude = visible_magnitude(mag0, r_pk, e_pk, az_pk, sun_elev, sun_az)
+            # Peak brightness over the whole visible pass (the value apps
+            # like 天文通 report), not the brightness at max elevation —
+            # they can differ by a magnitude or more.
+            magnitudes = [
+                visible_magnitude(mag0, r, e, az, *_sun_position(lat, lon, t))
+                for t, e, az, r in samples
+            ]
+            magnitude = min(magnitudes)
         events.append(
             PassEvent(
                 start=run_start_t or samples[0][0],

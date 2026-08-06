@@ -29,6 +29,10 @@ from shinbot_plugin_astroassist.transit import (
 _ISS_LINE1 = "1 25544U 98067A   26218.05391056  .00003997  00000+0  79690-4 0  9990"
 _ISS_LINE2 = "2 25544  51.6321  53.3065 0007216  17.1615 342.9616 15.49359774579487"
 
+# Fixed CSS (天和) TLE, same epoch — used for the 天文通 comparison pass.
+_CSS_LINE1 = "1 48274U 21035A   26218.13147276  .00013245  00000+0  17031-3 0  9995"
+_CSS_LINE2 = "2 48274  41.4698  18.8075 0001032 269.9767  90.0953 15.58844096300964"
+
 _BEIJING = (39.9042, 116.4074)
 
 _WINDOW_START = datetime(2026, 8, 6, 0, 0, 0, tzinfo=timezone.utc)
@@ -277,6 +281,22 @@ def test_compute_passes_magnitude_present_with_mag0() -> None:
         satrec, *_BEIJING, _WINDOW_START, _WINDOW_END, min_elevation=10.0
     )
     assert all(p.magnitude is None for p in passes_plain)
+
+
+def test_compute_passes_reports_peak_brightness_matching_reference() -> None:
+    # 天文通 shows this exact pass (咸宁, CSS, 08-09 05:24 BJT) at -0.7 mag.
+    # The reported value is the pass's peak brightness, which occurs at
+    # ~05:28 (near max elevation 38°), not at the 10° rise time.
+    satrec = build_satrec(_CSS_LINE1, _CSS_LINE2)
+    assert satrec is not None
+    start = datetime(2026, 8, 8, 21, 15, 0, tzinfo=timezone.utc)  # 08-09 05:15 BJT
+    end = start + timedelta(minutes=25)
+    passes = compute_passes(
+        satrec, 29.8493, 114.4708, start, end, min_elevation=10.0, mag0=0.9
+    )
+    assert len(passes) == 1
+    assert round(passes[0].max_elevation) == 38
+    assert round(passes[0].magnitude, 1) == -0.7
 
 
 # ------------------------------------------------------------------
