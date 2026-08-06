@@ -22,6 +22,7 @@ from shinbot_plugin_astroassist.transit import (
     fetch_transit_report,
     split_satellite_query,
     sun_elevation,
+    visible_magnitude,
 )
 
 # Fixed ISS TLE (epoch 2026-08-06) — deterministic propagation source.
@@ -255,6 +256,55 @@ def test_compute_passes_rejects_invalid_coordinates() -> None:
         compute_passes(satrec, 91.0, 0.0, _WINDOW_START, _WINDOW_END)
 
 
+def test_compute_passes_magnitude_present_with_mag0() -> None:
+    satrec = build_satrec(_ISS_LINE1, _ISS_LINE2)
+    assert satrec is not None
+    passes = compute_passes(
+        satrec,
+        *_BEIJING,
+        _WINDOW_START,
+        _WINDOW_END,
+        min_elevation=10.0,
+        mag0=-1.3,
+    )
+    assert passes
+    assert all(p.magnitude is not None for p in passes)
+    # Plausible ISS range: bright overhead pass to faint grazing pass.
+    assert all(-5.5 <= p.magnitude <= 4.0 for p in passes if p.magnitude is not None)
+
+    # Without mag0 no magnitude is attached.
+    passes_plain = compute_passes(
+        satrec, *_BEIJING, _WINDOW_START, _WINDOW_END, min_elevation=10.0
+    )
+    assert all(p.magnitude is None for p in passes_plain)
+
+
+# ------------------------------------------------------------------
+# Brightness model
+# ------------------------------------------------------------------
+
+
+def test_visible_magnitude_matches_reference_value() -> None:
+    # Heavens-Above style reference: ISS (m0=-1.3) at 483 km, 113° phase
+    # angle → about -2.0 mag. Geometry chosen so the observer-sun line
+    # subtends 113° from the observer-satellite line.
+    import math as _math
+
+    cos_phase = _math.cos(_math.radians(113.0))
+    sun_az = _math.degrees(_math.acos(2.0 * (cos_phase + 0.5)))
+    mag = visible_magnitude(-1.3, 483.0, 45.0, 0.0, -45.0, sun_az)
+    assert mag == pytest.approx(-2.0, abs=0.1)
+
+
+def test_visible_magnitude_distance_and_phase_trends() -> None:
+    overhead_full = visible_magnitude(-1.3, 400.0, 60.0, 0.0, 60.0, 0.0)
+    horizon = visible_magnitude(-1.3, 2000.0, 20.0, 0.0, 20.0, 0.0)
+    backlit = visible_magnitude(-1.3, 400.0, 60.0, 0.0, -60.0, 180.0)
+
+    assert overhead_full < horizon  # closer is brighter
+    assert overhead_full < backlit  # full phase is brighter than backlit
+
+
 # ------------------------------------------------------------------
 # Formatting
 # ------------------------------------------------------------------
@@ -334,6 +384,7 @@ def test_fetch_transit_report_builds_blocks_and_warnings(
     assert report is not None
     assert isinstance(report, TransitReport)
     assert any("国际空间站" in block for block in report.blocks)
+    assert "亮度" in report.blocks[0]  # ISS has a known standard magnitude
     assert "过境卫星预报" in report.to_text()
 
 

@@ -58,17 +58,20 @@ class SatelliteSpec:
     norad_id: int
     name: str
     english: str = ""
+    # Standard magnitude at 1000 km range and zero phase angle (approximate;
+    # used for apparent-brightness estimation when known).
+    mag0: float | None = None
 
 
 _SATELLITES: tuple[SatelliteSpec, ...] = (
-    SatelliteSpec(25544, "国际空间站", "ISS"),
-    SatelliteSpec(48274, "天宫空间站", "CSS"),
-    SatelliteSpec(20580, "哈勃空间望远镜", "HST"),
+    SatelliteSpec(25544, "国际空间站", "ISS", mag0=-1.3),
+    SatelliteSpec(48274, "天宫空间站", "CSS", mag0=0.9),
+    SatelliteSpec(20580, "哈勃空间望远镜", "HST", mag0=1.0),
 )
 
 _DEFAULT_SATELLITES: tuple[SatelliteSpec, ...] = (
-    SatelliteSpec(25544, "国际空间站", "ISS"),
-    SatelliteSpec(48274, "天宫空间站", "CSS"),
+    _SATELLITES[0],  # 国际空间站
+    _SATELLITES[1],  # 天宫空间站
 )
 
 _NAME_ALIASES: dict[str, int] = {
@@ -281,8 +284,12 @@ def _topocentric(
     return math.degrees(elev), math.degrees(az), range_km
 
 
-def sun_elevation(lat: float, lon: float, dt: datetime) -> float:
-    """Solar elevation in degrees at *(lat, lon)*; negative means below horizon."""
+def _sun_position(lat: float, lon: float, dt: datetime) -> tuple[float, float]:
+    """Solar ``(elevation, azimuth)`` in degrees at *(lat, lon)*.
+
+    Azimuth is measured clockwise from north; elevation is negative below
+    the horizon.
+    """
     jd, fr = _jday(dt)
     jd_full = jd + fr
     n = jd_full - 2451545.0
@@ -307,7 +314,47 @@ def sun_elevation(lat: float, lon: float, dt: datetime) -> float:
         math.sin(lat_r) * math.sin(dec)
         + math.cos(lat_r) * math.cos(dec) * math.cos(hour_angle)
     )
-    return math.degrees(alt)
+    # Azimuth measured from south, then converted to from-north.
+    az_south = math.atan2(
+        math.sin(hour_angle),
+        math.cos(hour_angle) * math.sin(lat_r) - math.tan(dec) * math.cos(lat_r),
+    )
+    az = (math.degrees(az_south) + 180.0) % 360.0
+    return math.degrees(alt), az
+
+
+def sun_elevation(lat: float, lon: float, dt: datetime) -> float:
+    """Solar elevation in degrees at *(lat, lon)*; negative means below horizon."""
+    return _sun_position(lat, lon, dt)[0]
+
+
+def visible_magnitude(
+    mag0: float,
+    range_km: float,
+    obs_elev_deg: float,
+    obs_az_deg: float,
+    sun_elev_deg: float,
+    sun_az_deg: float,
+) -> float:
+    """Estimate a satellite's apparent visual magnitude.
+
+    Model (diffuse-sphere): ``m = m0 + 5*log10(d/1000) - 2.5*log10[sin(α) +
+    (π-α)*cos(α)]`` with *m0* the standard magnitude at 1000 km and zero
+    phase angle α (the Sun-satellite-observer angle). Roughly matches
+    Heavens-Above predictions; expect ±0.5 mag scatter.
+    """
+    cos_phase = (
+        math.sin(math.radians(obs_elev_deg)) * math.sin(math.radians(sun_elev_deg))
+        + math.cos(math.radians(obs_elev_deg))
+        * math.cos(math.radians(sun_elev_deg))
+        * math.cos(math.radians(obs_az_deg - sun_az_deg))
+    )
+    phase = math.acos(max(-1.0, min(1.0, cos_phase)))
+    illuminated = math.sin(phase) + (math.pi - phase) * math.cos(phase)
+    illuminated = max(illuminated, 1e-4)
+    distance_term = 5.0 * math.log10(max(range_km, 1.0) / 1000.0)
+    phase_term = -2.5 * math.log10(illuminated)
+    return mag0 + distance_term + phase_term
 
 
 # ------------------------------------------------------------------
@@ -327,6 +374,9 @@ class PassEvent:
     az_peak: float
     az_end: float
     night: bool
+    # Apparent visual magnitude at peak; None when the satellite has no
+    # known standard magnitude.
+    magnitude: float | None = None
 
     @property
     def duration(self) -> timedelta:
@@ -366,12 +416,14 @@ def compute_passes(
     step_seconds: float = _STEP_SECONDS,
     night_only: bool = False,
     altitude_m: float = 0.0,
+    mag0: float | None = None,
 ) -> list[PassEvent]:
     """Compute passes of *satrec* over *(lat, lon)* in ``[start, end]``.
 
     Passes are found by scanning with a fixed time step and interpolating
     the rise/set instants at *min_elevation*; the peak is refined with a
-    parabolic fit. All timestamps are UTC.
+    parabolic fit. All timestamps are UTC. With *mag0* set, each pass also
+    carries an estimated apparent magnitude at its peak.
     """
     _validate_coordinates(lat, lon)
     start = _as_utc(start)
@@ -386,8 +438,8 @@ def compute_passes(
     in_run = False
     run_start_t: datetime | None = None
     run_start_az = 0.0
-    samples: list[tuple[datetime, float, float]] = []
-    prev: tuple[datetime, float, float] | None = None
+    samples: list[tuple[datetime, float, float, float]] = []
+    prev: tuple[datetime, float, float, float] | None = None
     t = start
 
     def finish_run(below_t: datetime | None, below_elev: float, below_az: float) -> None:
@@ -396,7 +448,7 @@ def compute_passes(
             return
         # Peak via parabolic fit around the highest sample
         peak_i = max(range(len(samples)), key=lambda i: samples[i][1])
-        t_pk, e_pk, az_pk = samples[peak_i]
+        t_pk, e_pk, az_pk, r_pk = samples[peak_i]
         if 0 < peak_i < len(samples) - 1:
             offset, refined = _refine_peak(
                 samples[peak_i - 1][1], e_pk, samples[peak_i + 1][1]
@@ -408,7 +460,7 @@ def compute_passes(
             # Window ends mid-pass: set time at the last sample
             t_end, az_end = samples[-1][0], samples[-1][2]
         else:
-            t_last, e_last, az_last = samples[-1]
+            t_last, e_last, az_last, _r_last = samples[-1]
             denom = below_elev - e_last
             frac = (min_elevation - e_last) / denom if abs(denom) > 1e-9 else 0.0
             frac = max(0.0, min(1.0, frac))
@@ -418,6 +470,10 @@ def compute_passes(
         night = sun_elevation(lat, lon, t_pk) < 0.0
         if night_only and not night:
             return
+        magnitude: float | None = None
+        if mag0 is not None:
+            sun_elev, sun_az = _sun_position(lat, lon, t_pk)
+            magnitude = visible_magnitude(mag0, r_pk, e_pk, az_pk, sun_elev, sun_az)
         events.append(
             PassEvent(
                 start=run_start_t or samples[0][0],
@@ -428,6 +484,7 @@ def compute_passes(
                 az_peak=az_pk,
                 az_end=az_end,
                 night=night,
+                magnitude=magnitude,
             )
         )
 
@@ -442,15 +499,15 @@ def compute_passes(
             prev = None
             t += step
             continue
-        elev, az, _range = topo
-        cur = (t, elev, az)
+        elev, az, range_km = topo
+        cur = (t, elev, az, range_km)
 
         if elev >= min_elevation:
             if not in_run:
                 in_run = True
                 samples = []
                 if prev is not None:
-                    t_prev, e_prev, az_prev = prev
+                    t_prev, e_prev, az_prev, _r_prev = prev
                     denom = elev - e_prev
                     frac = (
                         (min_elevation - e_prev) / denom if abs(denom) > 1e-9 else 0.0
@@ -497,12 +554,15 @@ def _format_pass_line(pass_event: PassEvent, tz: timezone) -> str:
     peak_l = pass_event.peak.astimezone(tz)
     duration_min = max(1, round(pass_event.duration.total_seconds() / 60.0))
     day_flag = "🌙 夜间" if pass_event.night else "☀️ 白天"
+    brightness = ""
+    if pass_event.magnitude is not None:
+        brightness = f" · 亮度 {pass_event.magnitude:+.1f} 等"
     return (
         f"{peak_l.month:02d}-{peak_l.day:02d} ({_WEEKDAYS[peak_l.weekday()]}) "
         f"{start_l:%H:%M}–{end_l:%H:%M} · 最高 {round(pass_event.max_elevation)}°"
         f" ({_azimuth_name(pass_event.az_peak)}) · "
         f"{_azimuth_name(pass_event.az_start)}→{_azimuth_name(pass_event.az_end)} · "
-        f"{duration_min} 分钟 · {day_flag}"
+        f"{duration_min} 分钟{brightness} · {day_flag}"
     )
 
 
@@ -648,6 +708,7 @@ async def fetch_transit_report(
             end,
             min_elevation=min_elevation,
             night_only=night_only,
+            mag0=spec.mag0,
         )
         blocks.append(_format_satellite_block(spec, passes, _local_tz()))
 
