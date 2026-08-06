@@ -13,12 +13,13 @@ from shinbot_plugin_astroassist.commands import register_commands
 from shinbot_plugin_astroassist.models import LocationData
 from shinbot_plugin_astroassist.storage import LocationStore
 from shinbot_plugin_astroassist.transit import (
+    TransitReport,
     _azimuth_name,
     _parse_tle,
     build_satrec,
+    build_transit_report,
     compute_passes,
     fetch_transit_report,
-    format_transit_report,
     split_satellite_query,
     sun_elevation,
 )
@@ -270,25 +271,33 @@ def test_azimuth_names_cover_compass_octants() -> None:
     assert _azimuth_name(22.6) == "东北"
 
 
-def test_format_transit_report_assembles_blocks() -> None:
+def test_build_transit_report_assembles_sections() -> None:
     start = _WINDOW_START
     end = _WINDOW_START + timedelta(days=3)
-    report = format_transit_report(
+    report = build_transit_report(
         "北京",
         *_BEIJING,
         start,
         end,
         ["【国际空间站 ISS】\n① 08-06 (周四) 21:00–21:10 · 最高 45° (西南) · 西南→东北 · 9 分钟 · 🌙 夜间"],
-        [],
+        ["⚠️ 哈勃空间望远镜: TLE 获取失败"],
         night_only=False,
         min_elevation=10.0,
     )
-    assert "🛰️ 过境卫星预报 | 北京" in report
-    assert "39.9042°N" in report and "116.4074°E" in report
-    assert "未来 3 天" in report
-    assert "高度角阈值 ≥ 10°" in report
-    assert "国际空间站" in report
-    assert "CelesTrak TLE + SGP4" in report
+    assert report.header.startswith("🛰️ 过境卫星预报 | 北京")
+    assert "39.9042°N" in report.header and "116.4074°E" in report.header
+    assert "未来 3 天" in report.header
+    assert report.blocks == (
+        "【国际空间站 ISS】\n① 08-06 (周四) 21:00–21:10 · 最高 45° (西南) · 西南→东北 · 9 分钟 · 🌙 夜间",
+    )
+    assert report.warnings == ("⚠️ 哈勃空间望远镜: TLE 获取失败",)
+    assert "高度角阈值 ≥ 10°" in report.footer
+    assert "CelesTrak TLE + SGP4" in report.footer
+
+    text = report.to_text()
+    assert "国际空间站" in text
+    assert "哈勃空间望远镜" in text
+    assert report.sections == [report.header, *report.blocks, *report.warnings, report.footer]
 
 
 # ------------------------------------------------------------------
@@ -323,8 +332,9 @@ def test_fetch_transit_report_builds_blocks_and_warnings(
     asyncio.run(run())
 
     assert report is not None
-    assert "【国际空间站 ISS】" in report
-    assert "过境卫星预报" in report
+    assert isinstance(report, TransitReport)
+    assert any("国际空间站" in block for block in report.blocks)
+    assert "过境卫星预报" in report.to_text()
 
 
 def test_fetch_transit_report_reports_missing_tle_warning(
@@ -346,8 +356,8 @@ def test_fetch_transit_report_reports_missing_tle_warning(
     report = asyncio.run(
         fetch_transit_report(*_BEIJING, "北京", query="国际空间站 天宫", days=1)
     )
-    assert "【国际空间站 ISS】" in report
-    assert "⚠️ 天宫空间站" in report
+    assert any("国际空间站" in block for block in report.blocks)
+    assert "⚠️ 天宫空间站" in report.to_text()
 
 
 # ------------------------------------------------------------------
@@ -374,12 +384,17 @@ async def test_transit_command_uses_stored_location(
 
     async def fake_fetch(
         lat: float, lon: float, location_name: str, **kwargs: Any
-    ) -> str:
+    ) -> TransitReport:
         captured["lat"] = lat
         captured["lon"] = lon
         captured["name"] = location_name
         captured["kwargs"] = kwargs
-        return f"🛰️ 过境卫星预报 | {location_name}"
+        return TransitReport(
+            header=f"🛰️ 过境卫星预报 | {location_name}",
+            blocks=(),
+            warnings=(),
+            footer="",
+        )
 
     monkeypatch.setattr(commands, "fetch_transit_report", fake_fetch)
 
@@ -428,3 +443,56 @@ async def test_transit_command_help_does_not_resolve_location(
 
     assert ctx.stopped is True
     assert "过境卫星预报 | 说明" in ctx.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_transit_command_sends_folded_forward_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shinbot_plugin_astroassist.commands as commands
+
+    async def fake_fetch(
+        lat: float, lon: float, location_name: str, **kwargs: Any
+    ) -> TransitReport:
+        return TransitReport(
+            header=f"🛰️ 过境卫星预报 | {location_name}",
+            blocks=(
+                "【国际空间站 ISS】\n① 08-07 (周五) 08:40–08:47 · 最高 47° (东南) · 西南→东北 · 6 分钟 · ☀️ 白天",
+                "【天宫空间站 CSS】\n① 08-07 (周五) 07:21–07:26 · 最高 30° (东南) · 西南→东 · 6 分钟 · ☀️ 白天",
+            ),
+            warnings=("⚠️ 哈勃空间望远镜: TLE 获取失败",),
+            footer="━━━━━━━━━━━━━━━\n高度角阈值 ≥ 10°\n数据源：CelesTrak TLE + SGP4 本地推算",
+        )
+
+    monkeypatch.setattr(commands, "fetch_transit_report", fake_fetch)
+
+    store = LocationStore(tmp_path)
+    await store.put(
+        "session-1", LocationData(lat=31.2304, lon=121.4737, name="上海")
+    )
+
+    plugin = _FakePlugin(tmp_path)
+    register_commands(
+        plugin,
+        SimpleNamespace(amap_key=""),
+        store,
+        tmp_path / "template.html",
+    )
+
+    ctx = _Ctx()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    await plugin.commands["过境卫星"]["handler"](ctx, "")
+
+    assert ctx.stopped is True
+    forward = ctx.sent[0][0]
+    assert forward["type"] == "message"
+    assert forward["attrs"]["forward"] == "true"
+    nodes = forward["children"]
+    assert len(nodes) == 5  # header, 2 satellite blocks, warnings, footer
+    assert all(node["attrs"]["nickname"] == "AstroAssist" for node in nodes)
+    contents = [node["children"][0]["attrs"]["content"] for node in nodes]
+    assert contents[0].startswith("🛰️ 过境卫星预报")
+    assert "国际空间站" in contents[1]
+    assert "天宫空间站" in contents[2]
+    assert "哈勃空间望远镜" in contents[3]
+    assert "数据源" in contents[4]

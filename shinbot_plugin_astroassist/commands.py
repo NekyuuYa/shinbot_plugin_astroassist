@@ -34,7 +34,7 @@ from .satellite import (
     fetch_satellite_gif,
 )
 from .storage import LocationStore
-from .transit import fetch_transit_report, split_satellite_query
+from .transit import TransitReport, fetch_transit_report, split_satellite_query
 from .typhoon import (
     NmcTyphoonNewsProvider,
     TyphoonDetail,
@@ -565,7 +565,8 @@ def register_commands(
             ctx.stop()
             return
 
-        await ctx.send(report)
+        if not await _send_transit_forward_message(ctx, report):
+            await ctx.send(report.to_text())
         ctx.stop()
 
 
@@ -1011,6 +1012,45 @@ def _supports_onebot_forward_message(ctx: MessageContext) -> bool:
     adapter_type_name = adapter_type.__name__.lower()
     adapter_module = adapter_type.__module__.lower()
     return "onebot" in adapter_type_name or "shinbot_adapter_onebot_v11" in adapter_module
+
+
+async def _send_transit_forward_message(
+    ctx: MessageContext,
+    report: TransitReport,
+) -> bool:
+    """Send the transit report as a folded chat-record message.
+
+    Returns ``False`` when the adapter has no forward-message support or the
+    send fails, so the caller can fall back to plain text.
+    """
+    if not _supports_onebot_forward_message(ctx):
+        return False
+
+    text_factory = getattr(MessageElement, "text", None)
+    message_factory = getattr(MessageElement, "message", None)
+    forward_factory = getattr(MessageElement, "forward", None)
+    if not (
+        callable(text_factory)
+        and callable(message_factory)
+        and callable(forward_factory)
+    ):
+        return False
+
+    nodes: list[Any] = []
+    for section in report.sections:
+        if not section.strip():
+            continue
+        nodes.append(
+            message_factory([text_factory(section)], nickname="AstroAssist")
+        )
+    if not nodes:
+        return False
+    try:
+        await ctx.send([forward_factory(nodes)])
+    except Exception:
+        _LOG.exception("AstroAssist transit folded message send failed")
+        return False
+    return True
 
 
 def _format_typhoon_track_caption(image: TyphoonTrackImage) -> str:

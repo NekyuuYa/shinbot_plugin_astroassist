@@ -522,7 +522,31 @@ def _format_satellite_block(
     return "\n".join(lines)
 
 
-def format_transit_report(
+@dataclass(frozen=True, slots=True)
+class TransitReport:
+    """Structured transit report, split into foldable message sections."""
+
+    header: str
+    blocks: tuple[str, ...]
+    warnings: tuple[str, ...]
+    footer: str
+
+    @property
+    def sections(self) -> list[str]:
+        """Sections suitable for a merged-forward (合并转发) message."""
+        parts: list[str] = [self.header]
+        parts.extend(self.blocks)
+        if self.warnings:
+            parts.append("\n".join(self.warnings))
+        parts.append(self.footer)
+        return parts
+
+    def to_text(self) -> str:
+        """The plain-text rendering of the report."""
+        return "\n".join(self.sections)
+
+
+def build_transit_report(
     location_name: str,
     lat: float,
     lon: float,
@@ -533,30 +557,37 @@ def format_transit_report(
     *,
     night_only: bool,
     min_elevation: float,
-) -> str:
-    """Assemble the final user-facing transit report (local-time display)."""
-    tz = datetime.now().astimezone().tzinfo
+) -> TransitReport:
+    """Assemble a structured transit report (local-time display)."""
+    tz = _local_tz()
     start_l = _as_utc(start).astimezone(tz)
     end_l = _as_utc(end).astimezone(tz)
     days = max(1, round((_as_utc(end) - _as_utc(start)).total_seconds() / 86400.0))
 
-    lines = [
-        f"🛰️ 过境卫星预报 | {location_name or '当前位置'}",
-        f"📍 {_format_coord(lat, 'N', 'S')}, {_format_coord(lon, 'E', 'W')}",
-        f"📅 未来 {days} 天：{start_l:%m-%d %H:%M} → {end_l:%m-%d %H:%M}",
-        "━━━━━━━━━━━━━━━",
-    ]
-    lines.extend(blocks)
-    if warnings:
-        lines.append("")
-        lines.extend(warnings)
-    lines.append("━━━━━━━━━━━━━━━")
+    header = "\n".join(
+        [
+            f"🛰️ 过境卫星预报 | {location_name or '当前位置'}",
+            f"📍 {_format_coord(lat, 'N', 'S')}, {_format_coord(lon, 'E', 'W')}",
+            f"📅 未来 {days} 天：{start_l:%m-%d %H:%M} → {end_l:%m-%d %H:%M}",
+            "━━━━━━━━━━━━━━━",
+        ]
+    )
     notes = [f"高度角阈值 ≥ {min_elevation:g}°"]
     if night_only:
         notes.append("🌙 仅显示夜间（太阳在地平线下）过境")
-    lines.append(" · ".join(notes))
-    lines.append("数据源：CelesTrak TLE + SGP4 本地推算")
-    return "\n".join(lines)
+    footer = "\n".join(
+        [
+            "━━━━━━━━━━━━━━━",
+            " · ".join(notes),
+            "数据源：CelesTrak TLE + SGP4 本地推算",
+        ]
+    )
+    return TransitReport(
+        header=header,
+        blocks=tuple(blocks),
+        warnings=tuple(warnings),
+        footer=footer,
+    )
 
 
 # ------------------------------------------------------------------
@@ -577,7 +608,7 @@ async def fetch_transit_report(
     days: int = 3,
     night_only: bool = False,
     min_elevation: float = _MIN_ELEVATION,
-) -> str:
+) -> TransitReport:
     """Fetch TLEs and compute a satellite pass report for *(lat, lon)*."""
     if not _SGP4_AVAILABLE:
         raise RuntimeError("缺少 sgp4 依赖，无法进行轨道推算。请安装 sgp4。")
@@ -623,7 +654,7 @@ async def fetch_transit_report(
     if not blocks:
         raise ValueError("所有卫星均无法获取轨道数据")
 
-    return format_transit_report(
+    return build_transit_report(
         location_name,
         lat,
         lon,
